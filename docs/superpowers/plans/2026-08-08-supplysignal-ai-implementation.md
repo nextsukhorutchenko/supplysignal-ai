@@ -162,6 +162,8 @@ The `typecheck` script must resolve the `tsc` executable supplied by `@typescrip
 
 Correction A4 (approved 2026-08-08): use ESLint `9.39.5`, the newest stable 9.x release supported by `eslint-config-next` `16.3.0`, `typescript-eslint` `8.66.0`, and `eslint-plugin-react` `7.37.5`. Preserve the complete Next.js lint configuration, zero-warning gate, and all enabled rules; do not add compatibility patches or disable `react/display-name`.
 
+Correction A5 (approved 2026-08-08): set `experimental.useTypeScriptCli` to `false` in `next.config.ts` so Next.js uses the installed TypeScript `6.0.2` compatibility API for its internal build integration. The mandatory `typecheck` script must continue to use the TypeScript `7.0.2` CLI and run before `next build`; do not disable Next.js type checking or apply dependency patches. Ignore `*.tsbuildinfo` and remove any generated build cache before staging.
+
 - [ ] **Step 2: Install with the pinned package manager**
 
 Run: `corepack prepare pnpm@11.20.0 --activate`
