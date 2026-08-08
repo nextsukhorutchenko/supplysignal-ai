@@ -1,6 +1,10 @@
 # SupplySignal AI Amendment A7: Plain-Data Boundary
 
-**Status:** Design approved; written specification pending owner review
+**Status:** Approved
+
+**Approved by:** Project owner
+
+**Written specification approval date:** 2026-08-08
 
 **Design approval date:** 2026-08-08
 
