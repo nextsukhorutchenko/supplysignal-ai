@@ -580,6 +580,15 @@ git commit -m "feat: enforce run and trust state machines"
 - Consumes: domain types from Tasks 2-3.
 - Produces: `RunStore`, `CalleGateway`, `BriefingPort`, `Clock`, `IdGenerator`, `createRun`, `authorizeRun`.
 
+**Correction A8 (approved 2026-08-08):** Add `RUN_CREATION_FAILED` without
+removing or changing existing error codes. `createRun` must preserve the
+existing plain-data errors for invalid caller input, but replace failures from
+`Clock.now`, `IdGenerator.next`, internal run construction, and
+`RunStore.create` with an `AppError` whose code and message are exactly
+`RUN_CREATION_FAILED` and contain no copied dependency detail. Validate two
+independent `RunRecord` object graphs: pass one to `RunStore.create` and return
+the other, with nested order and recipient references also isolated.
+
 ```ts
 export interface RunStore {
   create(run: RunRecord): Promise<void>;

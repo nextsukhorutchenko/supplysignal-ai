@@ -192,6 +192,7 @@ Provider `task_completed` and `completion_confidence` values are advisory eviden
 
 External failures are mapped to the following bounded error codes before crossing application boundaries:
 
+- `RUN_CREATION_FAILED`;
 - `AUTHORIZATION_REQUIRED`;
 - `UNSUPPORTED_RECIPIENT_REGION`;
 - `CALL_NOT_READY`;
@@ -204,6 +205,21 @@ External failures are mapped to the following bounded error codes before crossin
 - `ARTIFACT_PUBLICATION_FAILED`.
 
 Raw provider errors, tokens, phone numbers, internal prompts, and provider trace envelopes are not returned to the browser or written to public artifacts.
+
+### Correction A8 (Approved 2026-08-08)
+
+`createRun` dependency and internal creation failures use only the bounded
+`RUN_CREATION_FAILED` code and message. Errors from the clock, ID generator,
+and run store must not expose a full phone number, native path, internal detail,
+or copied dependency error. Existing plain-data validation remains authoritative
+for rejected caller input and is not converted into a creation failure.
+
+The validated `RunRecord` passed to `RunStore.create` and the validated
+`RunRecord` returned to the caller must be separate object graphs, including
+their nested order and recipient values. Mutation by a persistence adapter or
+caller must not cross that boundary. This copy isolation prevents a dependency
+or downstream caller from changing the other side's already validated record
+through shared JavaScript object identity.
 
 ## 9. Operator interface
 
