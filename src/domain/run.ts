@@ -6,6 +6,10 @@ import {
   type CallAuthorization,
 } from "./authorization.js";
 import { callRecipientSchema, type CallRecipient } from "./call-recipient.js";
+import {
+  persistedJsonValueSchema,
+  withPlainDataBoundary,
+} from "./plain-data.js";
 import { purchaseOrderSchema, type PurchaseOrder } from "./purchase-order.js";
 import { supplyRiskSchema, type SupplyRisk } from "./risk.js";
 import {
@@ -25,11 +29,6 @@ const MAX_EVIDENCE_EXCERPT_LENGTH = 1_000;
 const MAX_TURN_INDEXES = 120;
 const MAX_TURN_INDEX = 9_999;
 const MAX_CONFIDENCE_LABEL_LENGTH = 120;
-const MAX_PERSISTED_JSON_DEPTH = 8;
-const MAX_PERSISTED_JSON_CONTAINER_ENTRIES = 128;
-const MAX_PERSISTED_JSON_KEY_LENGTH = 256;
-const MAX_PERSISTED_JSON_STRING_LENGTH = 4_096;
-const MAX_PERSISTED_JSON_SERIALIZED_LENGTH = 32_768;
 
 const RUN_STATUSES = [
   "DRAFT",
@@ -90,188 +89,6 @@ export type RunRecord = {
   updatedAt: string;
 };
 
-type JsonBudget = {
-  serializedLength: number;
-};
-
-function addSerializedLength(budget: JsonBudget, length: number): boolean {
-  budget.serializedLength += length;
-  return budget.serializedLength <= MAX_PERSISTED_JSON_SERIALIZED_LENGTH;
-}
-
-function isBoundedJsonValue(value: unknown): boolean {
-  try {
-    return visitJsonValue(value, 0, new Set<object>(), { serializedLength: 0 });
-  } catch {
-    return false;
-  }
-}
-
-function visitJsonValue(
-  value: unknown,
-  depth: number,
-  ancestors: Set<object>,
-  budget: JsonBudget,
-): boolean {
-  if (depth > MAX_PERSISTED_JSON_DEPTH) {
-    return false;
-  }
-
-  if (value === null) {
-    return addSerializedLength(budget, 4);
-  }
-
-  if (typeof value === "string") {
-    return (
-      value.length <= MAX_PERSISTED_JSON_STRING_LENGTH &&
-      addSerializedLength(budget, JSON.stringify(value).length)
-    );
-  }
-
-  if (typeof value === "boolean") {
-    return addSerializedLength(budget, value ? 4 : 5);
-  }
-
-  if (typeof value === "number") {
-    return (
-      Number.isFinite(value) &&
-      addSerializedLength(budget, JSON.stringify(value).length)
-    );
-  }
-
-  if (typeof value !== "object" || ancestors.has(value)) {
-    return false;
-  }
-
-  if (Array.isArray(value)) {
-    if (
-      Object.getPrototypeOf(value) !== Array.prototype ||
-      value.length > MAX_PERSISTED_JSON_CONTAINER_ENTRIES ||
-      !addSerializedLength(budget, 2)
-    ) {
-      return false;
-    }
-
-    const ownKeys = Reflect.ownKeys(value);
-    if (
-      ownKeys.length !== value.length + 1 ||
-      ownKeys.some(
-        (key) =>
-          (typeof key !== "string" || key !== "length") &&
-          (typeof key !== "string" ||
-            !/^(0|[1-9]\d*)$/.test(key) ||
-            Number(key) >= value.length),
-      )
-    ) {
-      return false;
-    }
-
-    ancestors.add(value);
-    for (let index = 0; index < value.length; index += 1) {
-      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
-      if (
-        descriptor === undefined ||
-        !descriptor.enumerable ||
-        !("value" in descriptor) ||
-        (index > 0 && !addSerializedLength(budget, 1)) ||
-        !visitJsonValue(descriptor.value, depth + 1, ancestors, budget)
-      ) {
-        ancestors.delete(value);
-        return false;
-      }
-    }
-    ancestors.delete(value);
-    return true;
-  }
-
-  const prototype = Object.getPrototypeOf(value);
-  if (prototype !== Object.prototype && prototype !== null) {
-    return false;
-  }
-
-  const ownKeys = Reflect.ownKeys(value);
-  if (
-    ownKeys.length > MAX_PERSISTED_JSON_CONTAINER_ENTRIES ||
-    ownKeys.some(
-      (key) =>
-        typeof key !== "string" || key.length > MAX_PERSISTED_JSON_KEY_LENGTH,
-    ) ||
-    !addSerializedLength(budget, 2)
-  ) {
-    return false;
-  }
-
-  ancestors.add(value);
-  for (let index = 0; index < ownKeys.length; index += 1) {
-    const key = ownKeys[index];
-    if (typeof key !== "string") {
-      ancestors.delete(value);
-      return false;
-    }
-
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (
-      descriptor === undefined ||
-      !descriptor.enumerable ||
-      !("value" in descriptor) ||
-      (index > 0 && !addSerializedLength(budget, 1)) ||
-      !addSerializedLength(budget, JSON.stringify(key).length + 1) ||
-      !visitJsonValue(descriptor.value, depth + 1, ancestors, budget)
-    ) {
-      ancestors.delete(value);
-      return false;
-    }
-  }
-  ancestors.delete(value);
-  return true;
-}
-
-const boundedJsonValueSchema = z
-  .unknown()
-  .refine(isBoundedJsonValue, "Expected a bounded JSON value");
-
-function hasAccessorBackedOwnProperty(input: object): boolean {
-  return Reflect.ownKeys(input).some((key) => {
-    const descriptor = Object.getOwnPropertyDescriptor(input, key);
-    return descriptor === undefined || !("value" in descriptor);
-  });
-}
-
-function preflightProviderEvidenceInput(input: unknown): unknown {
-  try {
-    if (
-      input !== null &&
-      typeof input === "object" &&
-      hasAccessorBackedOwnProperty(input)
-    ) {
-      return null;
-    }
-
-    return input;
-  } catch {
-    return null;
-  }
-}
-
-function preflightRunRecordInput(input: unknown): unknown {
-  try {
-    if (input === null || typeof input !== "object") {
-      return input;
-    }
-
-    if (hasAccessorBackedOwnProperty(input)) {
-      return null;
-    }
-
-    const humanReview = Object.getOwnPropertyDescriptor(input, "humanReview");
-    return humanReview !== undefined && humanReview.value === undefined
-      ? null
-      : input;
-  } catch {
-    return null;
-  }
-}
-
 export const runStatusSchema = z.enum(RUN_STATUSES);
 
 const providerEvidenceSnapshotObjectSchema: z.ZodType<ProviderEvidenceSnapshot> =
@@ -295,7 +112,7 @@ const providerEvidenceSnapshotObjectSchema: z.ZodType<ProviderEvidenceSnapshot> 
       )
       .max(MAX_TRANSCRIPT_ITEMS)
       .readonly(),
-    structuredResult: boundedJsonValueSchema,
+    structuredResult: persistedJsonValueSchema,
     evidence: z
       .array(
         z.strictObject({
@@ -312,10 +129,7 @@ const providerEvidenceSnapshotObjectSchema: z.ZodType<ProviderEvidenceSnapshot> 
   });
 
 export const providerEvidenceSnapshotSchema: z.ZodType<ProviderEvidenceSnapshot> =
-  z.preprocess(
-    preflightProviderEvidenceInput,
-    providerEvidenceSnapshotObjectSchema,
-  );
+  withPlainDataBoundary(providerEvidenceSnapshotObjectSchema);
 
 const runRecordObjectSchema: z.ZodType<RunRecord> = z
   .strictObject({
@@ -342,7 +156,7 @@ const runRecordObjectSchema: z.ZodType<RunRecord> = z
     providerSnapshot: providerEvidenceSnapshotSchema.optional(),
     schemaValidation: z.enum(["not_run", "passed", "failed"]),
     consistencyValidation: z.enum(["not_run", "passed", "failed"]),
-    humanReview: boundedJsonValueSchema.optional(),
+    humanReview: persistedJsonValueSchema.optional(),
     risk: supplyRiskSchema.optional(),
     artifactState: z.enum(["none", "ready", "published", "failed"]),
     createdAt: isoTimestampSchema,
@@ -364,8 +178,7 @@ const runRecordObjectSchema: z.ZodType<RunRecord> = z
     }
   });
 
-export const runRecordSchema: z.ZodType<RunRecord> = z.preprocess(
-  preflightRunRecordInput,
+export const runRecordSchema: z.ZodType<RunRecord> = withPlainDataBoundary(
   runRecordObjectSchema,
 );
 

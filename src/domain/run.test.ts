@@ -298,6 +298,46 @@ describe("runRecordSchema", () => {
     expect(structuredResultGetterCalls.count).toBe(0);
   });
 
+  it("rejects inherited required run and provider fields without invoking getters", () => {
+    const runWithInheritedProvider = createRun();
+    let providerSnapshotGetterCalls = 0;
+    const runPrototype = {};
+    Object.defineProperty(runPrototype, "providerSnapshot", {
+      enumerable: true,
+      get() {
+        providerSnapshotGetterCalls += 1;
+        return createProviderSnapshot({ confirmedQuantity: 500 });
+      },
+    });
+    Object.setPrototypeOf(runWithInheritedProvider, runPrototype);
+
+    const snapshotWithInheritedResult = createProviderSnapshot(undefined);
+    delete (snapshotWithInheritedResult as { structuredResult?: unknown })
+      .structuredResult;
+    let structuredResultGetterCalls = 0;
+    const snapshotPrototype = {};
+    Object.defineProperty(snapshotPrototype, "structuredResult", {
+      enumerable: true,
+      get() {
+        structuredResultGetterCalls += 1;
+        return { confirmedQuantity: 500 };
+      },
+    });
+    Object.setPrototypeOf(snapshotWithInheritedResult, snapshotPrototype);
+
+    expect(runRecordSchema.safeParse(runWithInheritedProvider).success).toBe(
+      false,
+    );
+    expect(providerSnapshotGetterCalls).toBe(0);
+    expect(
+      runRecordSchema.safeParse({
+        ...createRun(),
+        providerSnapshot: snapshotWithInheritedResult,
+      }).success,
+    ).toBe(false);
+    expect(structuredResultGetterCalls).toBe(0);
+  });
+
   it("rejects nested JSON accessors without invoking their getters", () => {
     const structuredResult = createAccessorBackedValue("unsafe");
     const humanReview = createAccessorBackedValue("unsafe");

@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { withPlainDataBoundary } from "./plain-data.js";
+
 const MAX_QUANTITY = 1_000_000;
 const MAX_DELAY_REASON_LENGTH = 500;
 
@@ -25,7 +27,7 @@ const dateOnlySchema = z
   .length(10)
   .refine(isValidDateOnly, "Expected a valid ISO date-only value");
 
-export const supplierResponseFactsSchema = z.strictObject({
+const supplierResponseFactsObjectSchema = z.strictObject({
   contactOutcome: z.enum(["reached", "declined", "no_answer", "unknown"]),
   confirmedQuantity: z.number().int().nonnegative().max(MAX_QUANTITY),
   availableQuantity: z.number().int().nonnegative().max(MAX_QUANTITY),
@@ -36,15 +38,21 @@ export const supplierResponseFactsSchema = z.strictObject({
   unableToFulfill: z.enum(["yes", "no", "unknown"]),
 });
 
-export const supplierResponseSchema = supplierResponseFactsSchema.refine(
-  (response) =>
-    response.availableQuantity + response.delayedQuantity ===
-    response.confirmedQuantity,
-  {
-    message:
-      "Available and delayed quantities must equal the confirmed quantity",
-    path: ["delayedQuantity"],
-  },
+export const supplierResponseFactsSchema = withPlainDataBoundary(
+  supplierResponseFactsObjectSchema,
+);
+
+export const supplierResponseSchema = withPlainDataBoundary(
+  supplierResponseFactsObjectSchema.refine(
+    (response) =>
+      response.availableQuantity + response.delayedQuantity ===
+      response.confirmedQuantity,
+    {
+      message:
+        "Available and delayed quantities must equal the confirmed quantity",
+      path: ["delayedQuantity"],
+    },
+  ),
 );
 
 export type SupplierResponse = z.infer<typeof supplierResponseSchema>;

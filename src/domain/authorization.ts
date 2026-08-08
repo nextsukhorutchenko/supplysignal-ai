@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { withPlainDataBoundary } from "./plain-data.js";
+
 const MAX_TIMESTAMP_LENGTH = 40;
 const MAX_AUTHORIZATION_DIGEST_LENGTH = 256;
 const ISO_TIMESTAMP_PATTERN =
@@ -69,7 +71,7 @@ export type CallAuthorization = {
   authorizationDigest: string;
 };
 
-export const callAuthorizationSchema: z.ZodType<CallAuthorization> =
+const callAuthorizationObjectSchema: z.ZodType<CallAuthorization> =
   z.strictObject({
     consentToCall: z.literal(true),
     consentToRecord: z.literal(true),
@@ -84,3 +86,6 @@ export const callAuthorizationSchema: z.ZodType<CallAuthorization> =
       .min(1)
       .max(MAX_AUTHORIZATION_DIGEST_LENGTH),
   });
+
+export const callAuthorizationSchema: z.ZodType<CallAuthorization> =
+  withPlainDataBoundary(callAuthorizationObjectSchema);

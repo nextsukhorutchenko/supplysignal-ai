@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { withPlainDataBoundary } from "./plain-data.js";
 import { purchaseOrderSchema, type PurchaseOrder } from "./purchase-order.js";
 import {
   supplierResponseFactsSchema,
@@ -33,7 +34,7 @@ const atRiskReasonCodesSchema = z
   })
   .readonly();
 
-export const supplyRiskSchema = z.discriminatedUnion("status", [
+const supplyRiskObjectSchema = z.discriminatedUnion("status", [
   z.strictObject({
     status: z.literal("ON_TRACK"),
     reasonCodes: z.array(z.never()).length(0).readonly(),
@@ -51,6 +52,8 @@ export const supplyRiskSchema = z.discriminatedUnion("status", [
     reasonCodes: z.array(z.literal("INSUFFICIENT_FACTS")).length(1).readonly(),
   }),
 ]);
+
+export const supplyRiskSchema = withPlainDataBoundary(supplyRiskObjectSchema);
 
 export type SupplyRisk = z.infer<typeof supplyRiskSchema>;
 

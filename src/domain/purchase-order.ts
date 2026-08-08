@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { withPlainDataBoundary } from "./plain-data.js";
+
 const MAX_QUANTITY = 1_000_000;
 const MAX_SUPPLIER_NAME_LENGTH = 120;
 const MAX_PURCHASE_ORDER_REF_LENGTH = 64;
@@ -26,11 +28,15 @@ const dateOnlySchema = z
   .length(10)
   .refine(isValidDateOnly, "Expected a valid ISO date-only value");
 
-export const purchaseOrderSchema = z.strictObject({
+const purchaseOrderObjectSchema = z.strictObject({
   supplierName: z.string().trim().min(1).max(MAX_SUPPLIER_NAME_LENGTH),
   purchaseOrderRef: z.string().trim().min(1).max(MAX_PURCHASE_ORDER_REF_LENGTH),
   expectedQuantity: z.number().int().positive().max(MAX_QUANTITY),
   requiredDeliveryDate: dateOnlySchema,
 });
+
+export const purchaseOrderSchema = withPlainDataBoundary(
+  purchaseOrderObjectSchema,
+);
 
 export type PurchaseOrder = z.infer<typeof purchaseOrderSchema>;
