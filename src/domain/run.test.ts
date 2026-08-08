@@ -50,6 +50,34 @@ function createProviderSnapshot(structuredResult: unknown) {
   };
 }
 
+function createAccessorBackedValue(value: unknown) {
+  let getterCalls = 0;
+  const accessorBacked = {};
+  Object.defineProperty(accessorBacked, "unsafe", {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return value;
+    },
+  });
+
+  return { accessorBacked, getGetterCalls: () => getterCalls };
+}
+
+function createSparseAccessorArray() {
+  let getterCalls = 0;
+  const sparse = new Array<unknown>(2);
+  Object.defineProperty(sparse, "1", {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return "unsafe";
+    },
+  });
+
+  return { sparse, getGetterCalls: () => getterCalls };
+}
+
 describe("transitionRun", () => {
   it.each<[RunStatus, RunStatus]>([
     ["DRAFT", "AWAITING_APPROVAL"],
@@ -224,6 +252,92 @@ describe("runRecordSchema", () => {
         humanReview: undefined,
       }).success,
     ).toBe(false);
+  });
+
+  it("rejects accessor-backed root and provider fields without invoking getters", () => {
+    const humanReviewRun = createRun();
+    let humanReviewGetterCalls = 0;
+    Object.defineProperty(humanReviewRun, "humanReview", {
+      enumerable: true,
+      get() {
+        humanReviewGetterCalls += 1;
+        return { approved: true };
+      },
+    });
+
+    const providerSnapshotRun = createRun();
+    let providerSnapshotGetterCalls = 0;
+    Object.defineProperty(providerSnapshotRun, "providerSnapshot", {
+      enumerable: true,
+      get() {
+        providerSnapshotGetterCalls += 1;
+        return createProviderSnapshot({ confirmedQuantity: 500 });
+      },
+    });
+
+    const structuredResultGetterCalls = { count: 0 };
+    const snapshot = createProviderSnapshot({ confirmedQuantity: 500 });
+    Object.defineProperty(snapshot, "structuredResult", {
+      enumerable: true,
+      get() {
+        structuredResultGetterCalls.count += 1;
+        return { confirmedQuantity: 500 };
+      },
+    });
+
+    expect(runRecordSchema.safeParse(humanReviewRun).success).toBe(false);
+    expect(humanReviewGetterCalls).toBe(0);
+    expect(runRecordSchema.safeParse(providerSnapshotRun).success).toBe(false);
+    expect(providerSnapshotGetterCalls).toBe(0);
+    expect(
+      runRecordSchema.safeParse({
+        ...createRun(),
+        providerSnapshot: snapshot,
+      }).success,
+    ).toBe(false);
+    expect(structuredResultGetterCalls.count).toBe(0);
+  });
+
+  it("rejects nested JSON accessors without invoking their getters", () => {
+    const structuredResult = createAccessorBackedValue("unsafe");
+    const humanReview = createAccessorBackedValue("unsafe");
+
+    expect(
+      runRecordSchema.safeParse({
+        ...createRun(),
+        providerSnapshot: createProviderSnapshot(
+          structuredResult.accessorBacked,
+        ),
+      }).success,
+    ).toBe(false);
+    expect(structuredResult.getGetterCalls()).toBe(0);
+    expect(
+      runRecordSchema.safeParse({
+        ...createRun(),
+        humanReview: humanReview.accessorBacked,
+      }).success,
+    ).toBe(false);
+    expect(humanReview.getGetterCalls()).toBe(0);
+  });
+
+  it("rejects sparse accessor arrays without invoking their getters", () => {
+    const structuredResult = createSparseAccessorArray();
+    const humanReview = createSparseAccessorArray();
+
+    expect(
+      runRecordSchema.safeParse({
+        ...createRun(),
+        providerSnapshot: createProviderSnapshot(structuredResult.sparse),
+      }).success,
+    ).toBe(false);
+    expect(structuredResult.getGetterCalls()).toBe(0);
+    expect(
+      runRecordSchema.safeParse({
+        ...createRun(),
+        humanReview: humanReview.sparse,
+      }).success,
+    ).toBe(false);
+    expect(humanReview.getGetterCalls()).toBe(0);
   });
 
   it.each([

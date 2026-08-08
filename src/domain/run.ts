@@ -230,13 +230,19 @@ const boundedJsonValueSchema = z
   .unknown()
   .refine(isBoundedJsonValue, "Expected a bounded JSON value");
 
-function rejectExplicitUndefinedHumanReview(input: unknown): unknown {
+function hasAccessorBackedOwnProperty(input: object): boolean {
+  return Reflect.ownKeys(input).some((key) => {
+    const descriptor = Object.getOwnPropertyDescriptor(input, key);
+    return descriptor === undefined || !("value" in descriptor);
+  });
+}
+
+function preflightProviderEvidenceInput(input: unknown): unknown {
   try {
     if (
       input !== null &&
       typeof input === "object" &&
-      Object.prototype.hasOwnProperty.call(input, "humanReview") &&
-      (input as { humanReview?: unknown }).humanReview === undefined
+      hasAccessorBackedOwnProperty(input)
     ) {
       return null;
     }
@@ -247,9 +253,28 @@ function rejectExplicitUndefinedHumanReview(input: unknown): unknown {
   }
 }
 
+function preflightRunRecordInput(input: unknown): unknown {
+  try {
+    if (input === null || typeof input !== "object") {
+      return input;
+    }
+
+    if (hasAccessorBackedOwnProperty(input)) {
+      return null;
+    }
+
+    const humanReview = Object.getOwnPropertyDescriptor(input, "humanReview");
+    return humanReview !== undefined && humanReview.value === undefined
+      ? null
+      : input;
+  } catch {
+    return null;
+  }
+}
+
 export const runStatusSchema = z.enum(RUN_STATUSES);
 
-export const providerEvidenceSnapshotSchema: z.ZodType<ProviderEvidenceSnapshot> =
+const providerEvidenceSnapshotObjectSchema: z.ZodType<ProviderEvidenceSnapshot> =
   z.strictObject({
     callId: z.string().trim().min(1).max(MAX_CALL_ID_LENGTH),
     status: z.enum(PROVIDER_STATUSES),
@@ -285,6 +310,12 @@ export const providerEvidenceSnapshotSchema: z.ZodType<ProviderEvidenceSnapshot>
       .max(MAX_EVIDENCE_ITEMS)
       .readonly(),
   });
+
+export const providerEvidenceSnapshotSchema: z.ZodType<ProviderEvidenceSnapshot> =
+  z.preprocess(
+    preflightProviderEvidenceInput,
+    providerEvidenceSnapshotObjectSchema,
+  );
 
 const runRecordObjectSchema: z.ZodType<RunRecord> = z
   .strictObject({
@@ -334,7 +365,7 @@ const runRecordObjectSchema: z.ZodType<RunRecord> = z
   });
 
 export const runRecordSchema: z.ZodType<RunRecord> = z.preprocess(
-  rejectExplicitUndefinedHumanReview,
+  preflightRunRecordInput,
   runRecordObjectSchema,
 );
 
