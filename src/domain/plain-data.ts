@@ -220,20 +220,37 @@ function createPlainDataTransform(limits: PlainDataLimits): z.ZodType<unknown> {
   return z.unknown().transform((input, context) => {
     const result = canonicalizeWithLimits(input, limits);
     if (!result.success) {
-      context.addIssue({
-        code: "custom",
-        message: SAFE_PLAIN_DATA_MESSAGE,
-      });
+      addSafePlainDataIssue(context);
       return z.NEVER;
     }
     return result.value;
   });
 }
 
+function addSafePlainDataIssue(context: z.RefinementCtx): void {
+  context.addIssue({
+    code: "custom",
+    message: SAFE_PLAIN_DATA_MESSAGE,
+  });
+}
+
 export function withPlainDataBoundary<TOutput>(
   schema: z.ZodType<TOutput>,
 ): z.ZodType<TOutput> {
-  return createPlainDataTransform(GENERAL_LIMITS).pipe(schema);
+  return z.unknown().transform((input, context) => {
+    const canonicalized = canonicalizeWithLimits(input, GENERAL_LIMITS);
+    if (!canonicalized.success) {
+      addSafePlainDataIssue(context);
+      return z.NEVER;
+    }
+
+    const parsed = schema.safeParse(canonicalized.value);
+    if (!parsed.success) {
+      addSafePlainDataIssue(context);
+      return z.NEVER;
+    }
+    return parsed.data;
+  });
 }
 
 export const persistedJsonValueSchema: z.ZodType<unknown> =

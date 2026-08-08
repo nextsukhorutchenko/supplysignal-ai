@@ -235,3 +235,24 @@ object/array input through the shared boundary, no tested own or custom-
 prototype accessor executes, no `Object.prototype` property reaches Zod,
 existing domain behavior remains unchanged, required checks pass, and the
 independent review gate approves the complete Task 3 range.
+
+## Correction A7.2 (Approved)
+
+**Approval date:** 2026-08-08
+
+Public domain schema failures must expose only the stable bounded message
+`Expected safe plain JSON data`. This includes failures from the downstream
+strict object schemas and refinements after successful canonicalization. Raw
+unknown key names, values, provider content, and Zod issue details must not be
+included in the exposed or serialized error, while strict rejection remains
+required for all eight public object/array schemas.
+
+`canCompleteRun` and `transitionRun` must require `artifactState: "published"`
+for completion, in addition to the existing provider-terminal,
+schema-validation, consistency-validation, and human-confirmation conditions.
+Every successful `transitionRun` result must pass `runRecordSchema`.
+
+The persisted JSON boundary must retain exact depth `8`/`9` and container-entry
+`128`/`129` acceptance/rejection regressions, isolated so general boundary
+limits cannot decide those cases. Dense accessor-backed array regressions must
+assert that their getter counter remains zero.

@@ -8,6 +8,20 @@
 
 **Tech Stack:** Node.js `22.23.1`, pnpm `11.20.0`, TypeScript `7.0.2`, Zod `4.4.3`, Vitest `4.1.10`, ESLint `9.39.5`, Prettier `3.9.6`.
 
+## Correction A7.2 execution note (Approved)
+
+Before independent re-review, add RED/GREEN regressions showing that strict
+public schema failures do not disclose a raw unknown key or value and instead
+expose only `Expected safe plain JSON data`. Route every downstream failure of
+the eight public object/array schemas through that same bounded failure.
+
+Change completion to require published artifacts, ensure each successful
+`transitionRun` result validates through `runRecordSchema`, and keep the
+existing schema, consistency, and `HUMAN_CONFIRMED` requirements. Add exact
+persisted JSON depth `8`/`9` and container-entry `128`/`129` regressions that
+remain below the general boundary limits, plus a zero-invocation assertion for
+the dense accessor-backed array case. No other behavior is authorized.
+
 ## Global Constraints
 
 - The approved base specification is `docs/superpowers/specs/2026-08-08-supplysignal-ai-design.md`.

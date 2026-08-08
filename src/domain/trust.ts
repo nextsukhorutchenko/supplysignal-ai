@@ -20,6 +20,6 @@ export function canCompleteRun(run: RunRecord): boolean {
     run.schemaValidation === "passed" &&
     run.consistencyValidation === "passed" &&
     run.trustStatus === "HUMAN_CONFIRMED" &&
-    run.artifactState === "ready"
+    run.artifactState === "published"
   );
 }

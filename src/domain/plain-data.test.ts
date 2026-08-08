@@ -54,6 +54,17 @@ function createExactNodeTree(): unknown[][] {
   return tree;
 }
 
+function expectSafePlainDataError(result: {
+  success: false;
+  error: z.ZodError;
+}) {
+  expect(result.error.issues).toEqual([
+    expect.objectContaining({ message: "Expected safe plain JSON data" }),
+  ]);
+  expect(JSON.stringify(result.error)).not.toContain("RAW_SECRET_MARKER");
+  expect(result.error.message).not.toContain("RAW_SECRET_MARKER");
+}
+
 function putOnAccessorPrototype<T extends Record<string, unknown>>(value: T) {
   let calls = 0;
   const prototype = {};
@@ -236,21 +247,23 @@ describe("canonicalizePlainData", () => {
       },
     ],
     ["a sparse array", () => new Array(2)],
-    [
-      "an accessor-backed array index",
-      () => {
-        const input = ["safe"];
-        Object.defineProperty(input, "0", {
-          enumerable: true,
-          get() {
-            return "should-not-run";
-          },
-        });
-        return input;
-      },
-    ],
   ] as const)("rejects %s", (_reason, createValue) => {
     expect(canonicalizePlainData(createValue())).toEqual({ success: false });
+  });
+
+  it("rejects an accessor-backed dense array without invoking its getter", () => {
+    let calls = 0;
+    const input = ["safe"];
+    Object.defineProperty(input, "0", {
+      enumerable: true,
+      get() {
+        calls += 1;
+        return "should-not-run";
+      },
+    });
+
+    expect(canonicalizePlainData(input)).toEqual({ success: false });
+    expect(calls).toBe(0);
   });
 
   it("rejects reserved prototype-pollution keys", () => {
@@ -298,14 +311,7 @@ describe("canonicalizePlainData", () => {
 
     expect(result.success).toBe(false);
     if (!result.success) {
-      expect(result.error.issues).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ message: "Expected safe plain JSON data" }),
-        ]),
-      );
-      expect(JSON.stringify(result.error.issues)).not.toContain(
-        "RAW_SECRET_MARKER",
-      );
+      expectSafePlainDataError(result);
     }
   });
 
@@ -323,11 +329,7 @@ describe("canonicalizePlainData", () => {
 
     expect(result.success).toBe(false);
     if (!result.success) {
-      expect(result.error.issues).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ message: "Expected safe plain JSON data" }),
-        ]),
-      );
+      expectSafePlainDataError(result);
     }
   });
 
@@ -351,6 +353,34 @@ describe("canonicalizePlainData", () => {
 
       expect(schema.safeParse(input.input).success).toBe(false);
       expect(input.calls()).toBe(0);
+    },
+  );
+
+  it.each([
+    ["purchaseOrderSchema", purchaseOrderSchema, validOrder],
+    ["callRecipientSchema", callRecipientSchema, validRecipient],
+    ["supplierResponseFactsSchema", supplierResponseFactsSchema, validResponse],
+    ["supplierResponseSchema", supplierResponseSchema, validResponse],
+    ["supplyRiskSchema", supplyRiskSchema, validRisk],
+    ["callAuthorizationSchema", callAuthorizationSchema, validAuthorization],
+    [
+      "providerEvidenceSnapshotSchema",
+      providerEvidenceSnapshotSchema,
+      validProviderSnapshot,
+    ],
+    ["runRecordSchema", runRecordSchema, validRun],
+  ] as const)(
+    "redacts strict-schema failures through %s",
+    (_name, schema, value) => {
+      const result = schema.safeParse({
+        ...value,
+        RAW_SECRET_MARKER: "RAW_SECRET_MARKER",
+      });
+
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expectSafePlainDataError(result);
+      }
     },
   );
 

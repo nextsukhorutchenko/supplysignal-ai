@@ -96,7 +96,10 @@ describe("transitionRun", () => {
     ["PROVIDER_REPORTED_TERMINAL", "OUTCOME_UNKNOWN"],
     ["PROVIDER_REPORTED_TERMINAL", "FAILED"],
   ])("allows %s to %s", (status, next) => {
-    expect(transitionRun(createRun({ status }), next).status).toBe(next);
+    const transitioned = transitionRun(createRun({ status }), next);
+
+    expect(transitioned.status).toBe(next);
+    expect(runRecordSchema.safeParse(transitioned).success).toBe(true);
   });
 
   it.each<RunStatus>([
@@ -131,23 +134,46 @@ describe("transitionRun", () => {
   });
 
   it("allows completion only after the completion predicate passes", () => {
-    const readyForCompletion = createRun({
+    const publishedForCompletion = createRun({
       status: "PROVIDER_REPORTED_TERMINAL",
       schemaValidation: "passed",
       consistencyValidation: "passed",
       trustStatus: "HUMAN_CONFIRMED",
-      artifactState: "ready",
+      artifactState: "published",
     });
 
-    expect(transitionRun(readyForCompletion, "COMPLETED").status).toBe(
-      "COMPLETED",
-    );
+    const completed = transitionRun(publishedForCompletion, "COMPLETED");
+    expect(completed.status).toBe("COMPLETED");
+    expect(runRecordSchema.safeParse(completed).success).toBe(true);
+    expect(() =>
+      transitionRun(
+        createRun({
+          status: "PROVIDER_REPORTED_TERMINAL",
+          schemaValidation: "passed",
+          consistencyValidation: "passed",
+          trustStatus: "HUMAN_CONFIRMED",
+          artifactState: "ready",
+        }),
+        "COMPLETED",
+      ),
+    ).toThrowError("RUN_TRANSITION_FORBIDDEN");
     expect(() =>
       transitionRun(
         createRun({ status: "PROVIDER_REPORTED_TERMINAL" }),
         "COMPLETED",
       ),
     ).toThrowError("RUN_TRANSITION_FORBIDDEN");
+  });
+
+  it("does not return a transition result that fails run-record validation", () => {
+    const invalidRun = {
+      ...createRun(),
+      id: " ",
+    } as RunRecord;
+
+    expect(() => transitionRun(invalidRun, "AWAITING_APPROVAL")).toThrowError(
+      "RUN_TRANSITION_FORBIDDEN",
+    );
   });
 
   it("preserves unrelated fields without mutating or timestamp invention", () => {
@@ -228,6 +254,47 @@ describe("runRecordSchema", () => {
       }).success,
     ).toBe(true);
   });
+
+  it.each([
+    [
+      "structured result",
+      (value: unknown) => ({ providerSnapshot: createProviderSnapshot(value) }),
+    ],
+    ["human review", (value: unknown) => ({ humanReview: value })],
+  ] as const)(
+    "enforces exact persisted JSON depth and entry limits for %s",
+    (_name, placeValue) => {
+      let depthEight: unknown = "leaf";
+      for (let index = 0; index < 8; index += 1) {
+        depthEight = { value: depthEight };
+      }
+      let depthNine: unknown = "leaf";
+      for (let index = 0; index < 9; index += 1) {
+        depthNine = { value: depthNine };
+      }
+
+      expect(
+        runRecordSchema.safeParse({ ...createRun(), ...placeValue(depthEight) })
+          .success,
+      ).toBe(true);
+      expect(
+        runRecordSchema.safeParse({ ...createRun(), ...placeValue(depthNine) })
+          .success,
+      ).toBe(false);
+      expect(
+        runRecordSchema.safeParse({
+          ...createRun(),
+          ...placeValue(Array.from({ length: 128 }, () => 0)),
+        }).success,
+      ).toBe(true);
+      expect(
+        runRecordSchema.safeParse({
+          ...createRun(),
+          ...placeValue(Array.from({ length: 129 }, () => 0)),
+        }).success,
+      ).toBe(false);
+    },
+  );
 
   it("requires structuredResult and rejects an explicitly undefined human review", () => {
     expect(

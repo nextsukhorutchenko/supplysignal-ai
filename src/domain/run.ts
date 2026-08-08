@@ -217,5 +217,10 @@ export function transitionRun(run: RunRecord, next: RunStatus): RunRecord {
     throw new DomainError();
   }
 
-  return { ...run, status: next, version: run.version + 1 };
+  const transitioned = { ...run, status: next, version: run.version + 1 };
+  if (!runRecordSchema.safeParse(transitioned).success) {
+    throw new DomainError();
+  }
+
+  return transitioned;
 }

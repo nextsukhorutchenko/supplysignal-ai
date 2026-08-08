@@ -26,7 +26,7 @@ function createRun(overrides: Partial<RunRecord> = {}): RunRecord {
     },
     schemaValidation: "passed",
     consistencyValidation: "passed",
-    artifactState: "ready",
+    artifactState: "published",
     createdAt: "2026-08-08T12:00:00.000Z",
     updatedAt: "2026-08-08T12:01:00.000Z",
     ...overrides,
@@ -49,7 +49,7 @@ describe("canCompleteRun", () => {
       "human confirmation is absent",
       { trustStatus: "CONSISTENCY_CHECK_PASSED" },
     ],
-    ["artifacts are not ready", { artifactState: "none" }],
+    ["artifacts are ready but not published", { artifactState: "ready" }],
   ] as const)("rejects completion when %s", (_reason, overrides) => {
     expect(canCompleteRun(createRun(overrides))).toBe(false);
   });
