@@ -6,7 +6,7 @@
 
 **Architecture:** Use one strict TypeScript package with pure domain modules, explicit application ports, a server-only CALL-E REST adapter, a deterministic trust and risk pipeline, an OpenAI explanatory adapter, filesystem persistence, and a replay-only hosted mode. Complete the minimum CALL-E slice and pass the three-call truthfulness preflight before expanding into the full UI and release surface.
 
-**Tech Stack:** Node.js `22.23.1`, pnpm `11.20.0`, Next.js `16.3.0`, React `19.2.8`, TypeScript `7.0.2`, Zod `4.4.3`, OpenAI SDK `7.4.0`, Vitest `4.1.10`, Playwright `1.62.1`, ESLint `10.8.1`, Prettier `3.9.6`.
+**Tech Stack:** Node.js `22.23.1`, pnpm `11.20.0`, Next.js `16.3.0`, React `19.2.8`, TypeScript `7.0.2`, Zod `4.4.3`, OpenAI SDK `7.4.0`, Vitest `4.1.10`, Playwright `1.62.1`, ESLint `10.8.0`, Prettier `3.9.6`.
 
 ## Global Constraints
 
@@ -118,6 +118,7 @@
 - Create: `README.md`
 - Create: `package.json`
 - Create: `pnpm-lock.yaml`
+- Create: `pnpm-workspace.yaml`
 - Create: `tsconfig.json`
 - Create: `next-env.d.ts`
 - Create: `next.config.ts`
@@ -137,6 +138,14 @@
 - [ ] **Step 1: Create the package manifest with exact versions and scripts**
 
 Use `packageManager: "pnpm@11.20.0"`, `engines.node: "22.23.1"`, and exact dependency versions from the plan header. Define scripts `dev`, `build`, `start`, `typecheck`, `lint`, `format:check`, `test`, `test:coverage`, `test:e2e`, `scan:secrets`, `check:build-clean`, and `verify`.
+
+Correction A2 (approved 2026-08-08): use `@types/node` `26.1.2`, ESLint `10.8.0`, and tsx `4.23.10` so the repository does not bypass pnpm's 24-hour minimum-release-age protection. Add this root-only pnpm configuration; omitting `packages` keeps the repository a single package:
+
+```yaml
+allowBuilds:
+  esbuild@0.28.1: true
+  unrs-resolver@1.12.2: true
+```
 
 - [ ] **Step 2: Install with the pinned package manager**
 
