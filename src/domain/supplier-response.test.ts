@@ -43,6 +43,38 @@ describe("supplierResponseSchema", () => {
     },
   );
 
+  it("accepts the maximum quantity boundary when response quantities reconcile", () => {
+    expect(
+      supplierResponseSchema.parse({
+        ...validResponse,
+        confirmedQuantity: 1_000_000,
+        availableQuantity: 1_000_000,
+        delayedQuantity: 0,
+      }),
+    ).toMatchObject({ confirmedQuantity: 1_000_000 });
+  });
+
+  it.each([1_000_001, Number.NEGATIVE_INFINITY])(
+    "rejects a confirmed quantity outside the finite supported range: %s",
+    (confirmedQuantity) => {
+      expect(() =>
+        supplierResponseSchema.parse({ ...validResponse, confirmedQuantity }),
+      ).toThrow();
+    },
+  );
+
+  it.each(["0004-02-29", "0099-12-31", "2000-02-29"])(
+    "accepts a valid proleptic-Gregorian promised delivery date of %s",
+    (promisedDeliveryDate) => {
+      expect(
+        supplierResponseSchema.parse({
+          ...validResponse,
+          promisedDeliveryDate,
+        }),
+      ).toMatchObject({ promisedDeliveryDate });
+    },
+  );
+
   it("accepts unknown facts only through their explicit literals", () => {
     expect(
       supplierResponseSchema.parse({
@@ -55,7 +87,7 @@ describe("supplierResponseSchema", () => {
     expect(() =>
       supplierResponseSchema.parse({
         ...validResponse,
-        promisedDeliveryDate: "2026-02-29",
+        promisedDeliveryDate: "0001-02-29",
       }),
     ).toThrow();
   });

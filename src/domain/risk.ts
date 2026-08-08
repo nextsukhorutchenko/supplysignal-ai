@@ -6,10 +6,51 @@ import {
   type SupplierResponse,
 } from "./supplier-response.js";
 
-export const supplyRiskSchema = z.strictObject({
-  status: z.enum(["ON_TRACK", "AT_RISK", "BLOCKED", "OUTCOME_UNKNOWN"]),
-  reasonCodes: z.array(z.string()).readonly(),
-});
+const AT_RISK_REASON_CODES = [
+  "PARTIAL_AVAILABILITY",
+  "LATE_PROMISE",
+  "HUMAN_FOLLOW_UP",
+] as const;
+
+const atRiskReasonCodesSchema = z
+  .array(z.enum(AT_RISK_REASON_CODES))
+  .min(1)
+  .superRefine((reasonCodes, context) => {
+    const canonicalCodes = AT_RISK_REASON_CODES.filter((code) =>
+      reasonCodes.includes(code),
+    );
+
+    if (
+      reasonCodes.length !== canonicalCodes.length ||
+      reasonCodes.some((code, index) => code !== canonicalCodes[index])
+    ) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "AT_RISK reason codes must be a canonical, deduplicated subset",
+      });
+    }
+  })
+  .readonly();
+
+export const supplyRiskSchema = z.discriminatedUnion("status", [
+  z.strictObject({
+    status: z.literal("ON_TRACK"),
+    reasonCodes: z.array(z.never()).length(0).readonly(),
+  }),
+  z.strictObject({
+    status: z.literal("AT_RISK"),
+    reasonCodes: atRiskReasonCodesSchema,
+  }),
+  z.strictObject({
+    status: z.literal("BLOCKED"),
+    reasonCodes: z.array(z.literal("UNABLE_TO_FULFILL")).length(1).readonly(),
+  }),
+  z.strictObject({
+    status: z.literal("OUTCOME_UNKNOWN"),
+    reasonCodes: z.array(z.literal("INSUFFICIENT_FACTS")).length(1).readonly(),
+  }),
+]);
 
 export type SupplyRisk = z.infer<typeof supplyRiskSchema>;
 
@@ -46,7 +87,9 @@ export function assessSupplyRisk(
       ? "LATE_PROMISE"
       : undefined,
     parsedResponse.followUpRequired === "yes" ? "HUMAN_FOLLOW_UP" : undefined,
-  ].filter((code): code is string => code !== undefined);
+  ].filter(
+    (code): code is (typeof AT_RISK_REASON_CODES)[number] => code !== undefined,
+  );
 
   return reasonCodes.length > 0
     ? { status: "AT_RISK", reasonCodes }

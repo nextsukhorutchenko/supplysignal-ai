@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { PurchaseOrder } from "./purchase-order.js";
 import type { SupplierResponse } from "./supplier-response.js";
-import { assessSupplyRisk } from "./risk.js";
+import { assessSupplyRisk, supplyRiskSchema } from "./risk.js";
 
 const order500: PurchaseOrder = {
   supplierName: "Northstar Components",
@@ -23,6 +23,55 @@ const response350Ready: SupplierResponse = {
 };
 
 describe("assessSupplyRisk", () => {
+  it("accepts only the approved status and reason-code combinations", () => {
+    expect(
+      supplyRiskSchema.parse({ status: "ON_TRACK", reasonCodes: [] }),
+    ).toEqual({ status: "ON_TRACK", reasonCodes: [] });
+    expect(
+      supplyRiskSchema.parse({
+        status: "BLOCKED",
+        reasonCodes: ["UNABLE_TO_FULFILL"],
+      }),
+    ).toEqual({ status: "BLOCKED", reasonCodes: ["UNABLE_TO_FULFILL"] });
+    expect(
+      supplyRiskSchema.parse({
+        status: "OUTCOME_UNKNOWN",
+        reasonCodes: ["INSUFFICIENT_FACTS"],
+      }),
+    ).toEqual({
+      status: "OUTCOME_UNKNOWN",
+      reasonCodes: ["INSUFFICIENT_FACTS"],
+    });
+    expect(
+      supplyRiskSchema.parse({
+        status: "AT_RISK",
+        reasonCodes: ["PARTIAL_AVAILABILITY", "HUMAN_FOLLOW_UP"],
+      }),
+    ).toEqual({
+      status: "AT_RISK",
+      reasonCodes: ["PARTIAL_AVAILABILITY", "HUMAN_FOLLOW_UP"],
+    });
+  });
+
+  it.each([
+    { status: "ON_TRACK", reasonCodes: ["PARTIAL_AVAILABILITY"] },
+    { status: "BLOCKED", reasonCodes: [] },
+    { status: "BLOCKED", reasonCodes: ["UNABLE_TO_FULFILL", "LATE_PROMISE"] },
+    { status: "OUTCOME_UNKNOWN", reasonCodes: ["LATE_PROMISE"] },
+    { status: "AT_RISK", reasonCodes: [] },
+    {
+      status: "AT_RISK",
+      reasonCodes: ["LATE_PROMISE", "PARTIAL_AVAILABILITY"],
+    },
+    {
+      status: "AT_RISK",
+      reasonCodes: ["PARTIAL_AVAILABILITY", "PARTIAL_AVAILABILITY"],
+    },
+    { status: "AT_RISK", reasonCodes: ["ARBITRARY_REASON"] },
+  ])("rejects invalid status and reason-code combinations", (risk) => {
+    expect(() => supplyRiskSchema.parse(risk)).toThrow();
+  });
+
   it("returns insufficient facts before any other rule for a no-answer outcome", () => {
     expect(
       assessSupplyRisk(order500, {
@@ -55,6 +104,18 @@ describe("assessSupplyRisk", () => {
       assessSupplyRisk(order500, {
         ...response350Ready,
         promisedDeliveryDate: "unknown",
+      }),
+    ).toEqual({
+      status: "OUTCOME_UNKNOWN",
+      reasonCodes: ["INSUFFICIENT_FACTS"],
+    });
+  });
+
+  it("returns insufficient facts for an unknown contact outcome", () => {
+    expect(
+      assessSupplyRisk(order500, {
+        ...response350Ready,
+        contactOutcome: "unknown",
       }),
     ).toEqual({
       status: "OUTCOME_UNKNOWN",

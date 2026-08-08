@@ -9,14 +9,15 @@ function isValidDateOnly(value: string): boolean {
   }
 
   const [year, month, day] = value.split("-").map(Number);
-  const date = new Date(Date.UTC(year, month - 1, day));
+  const isLeapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth =
+    month === 2
+      ? isLeapYear
+        ? 29
+        : 28
+      : [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
 
-  return (
-    year >= 1 &&
-    date.getUTCFullYear() === year &&
-    date.getUTCMonth() === month - 1 &&
-    date.getUTCDate() === day
-  );
+  return month >= 1 && month <= 12 && day >= 1 && day <= daysInMonth;
 }
 
 const dateOnlySchema = z
