@@ -6,7 +6,7 @@
 
 **Architecture:** Use one strict TypeScript package with pure domain modules, explicit application ports, a server-only CALL-E REST adapter, a deterministic trust and risk pipeline, an OpenAI explanatory adapter, filesystem persistence, and a replay-only hosted mode. Complete the minimum CALL-E slice and pass the three-call truthfulness preflight before expanding into the full UI and release surface.
 
-**Tech Stack:** Node.js `22.23.1`, pnpm `11.20.0`, Next.js `16.3.0`, React `19.2.8`, TypeScript `7.0.2`, Zod `4.4.3`, OpenAI SDK `7.4.0`, Vitest `4.1.10`, Playwright `1.62.1`, ESLint `10.8.0`, Prettier `3.9.6`.
+**Tech Stack:** Node.js `22.23.1`, pnpm `11.20.0`, Next.js `16.3.0`, React `19.2.8`, TypeScript `7.0.2`, Zod `4.4.3`, OpenAI SDK `7.4.0`, Vitest `4.1.10`, Playwright `1.62.1`, ESLint `9.39.5`, Prettier `3.9.6`.
 
 ## Global Constraints
 
@@ -139,7 +139,7 @@
 
 Use `packageManager: "pnpm@11.20.0"`, `engines.node: "22.23.1"`, and exact dependency versions from the plan header. Define scripts `dev`, `build`, `start`, `typecheck`, `lint`, `format:check`, `test`, `test:coverage`, `test:e2e`, `scan:secrets`, `check:build-clean`, and `verify`.
 
-Correction A2 (approved 2026-08-08): use `@types/node` `26.1.2`, ESLint `10.8.0`, and tsx `4.23.10` so the repository does not bypass pnpm's 24-hour minimum-release-age protection. Add this root-only pnpm configuration; omitting `packages` keeps the repository a single package:
+Correction A2 (approved 2026-08-08): use `@types/node` `26.1.2` and tsx `4.23.10` so the repository does not bypass pnpm's 24-hour minimum-release-age protection. Add this root-only pnpm configuration; omitting `packages` keeps the repository a single package:
 
 ```yaml
 allowBuilds:
@@ -159,6 +159,8 @@ Correction A3 (approved 2026-08-08): keep TypeScript `7.0.2` as the project comp
 ```
 
 The `typecheck` script must resolve the `tsc` executable supplied by `@typescript/native` (TypeScript `7.0.2`), while ESLint-compatible tooling imports the TypeScript `6.0.2` API through the `typescript` package name.
+
+Correction A4 (approved 2026-08-08): use ESLint `9.39.5`, the newest stable 9.x release supported by `eslint-config-next` `16.3.0`, `typescript-eslint` `8.66.0`, and `eslint-plugin-react` `7.37.5`. Preserve the complete Next.js lint configuration, zero-warning gate, and all enabled rules; do not add compatibility patches or disable `react/display-name`.
 
 - [ ] **Step 2: Install with the pinned package manager**
 
