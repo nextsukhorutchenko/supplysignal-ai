@@ -147,6 +147,19 @@ allowBuilds:
   unrs-resolver@1.12.2: true
 ```
 
+Correction A3 (approved 2026-08-08): keep TypeScript `7.0.2` as the project compiler while providing the TypeScript `6.0.2` compatibility API required by `typescript-eslint`. Use the exact official side-by-side aliases below; do not disable lint rules, warnings, or the TypeScript 7 typecheck:
+
+```json
+{
+  "devDependencies": {
+    "@typescript/native": "npm:typescript@7.0.2",
+    "typescript": "npm:@typescript/typescript6@6.0.2"
+  }
+}
+```
+
+The `typecheck` script must resolve the `tsc` executable supplied by `@typescript/native` (TypeScript `7.0.2`), while ESLint-compatible tooling imports the TypeScript `6.0.2` API through the `typescript` package name.
+
 - [ ] **Step 2: Install with the pinned package manager**
 
 Run: `corepack prepare pnpm@11.20.0 --activate`
