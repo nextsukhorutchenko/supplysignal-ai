@@ -37,6 +37,19 @@ function createRun(overrides: Partial<RunRecord> = {}): RunRecord {
   };
 }
 
+function createProviderSnapshot(structuredResult: unknown) {
+  return {
+    callId: "provider-call-001",
+    status: "completed" as const,
+    observedAt: "2026-08-08T12:00:30.000Z",
+    taskCompleted: true,
+    completionConfidence: { score: 1, label: "certain" },
+    transcript: [{ speaker: "user" as const, text: "Complete" }],
+    structuredResult,
+    evidence: [{ id: "evidence-001", excerpt: "Complete", turnIndexes: [0] }],
+  };
+}
+
 describe("transitionRun", () => {
   it.each<[RunStatus, RunStatus]>([
     ["DRAFT", "AWAITING_APPROVAL"],
@@ -145,7 +158,7 @@ describe("runRecordSchema", () => {
       "human confirmation is absent",
       { trustStatus: "CONSISTENCY_CHECK_PASSED" },
     ],
-    ["artifacts are not ready or published", { artifactState: "none" }],
+    ["artifacts are ready but not yet published", { artifactState: "ready" }],
   ] as const)("rejects a completed record when %s", (_reason, overrides) => {
     expect(
       runRecordSchema.safeParse(
@@ -154,27 +167,121 @@ describe("runRecordSchema", () => {
           schemaValidation: "passed",
           consistencyValidation: "passed",
           trustStatus: "HUMAN_CONFIRMED",
-          artifactState: "ready",
+          artifactState: "published",
           ...overrides,
         }),
       ).success,
     ).toBe(false);
   });
 
-  it.each(["ready", "published"] as const)(
-    "accepts a completed record with %s artifacts after all completion checks",
-    (artifactState) => {
+  it("accepts a completed record only after published artifacts and all completion checks", () => {
+    expect(
+      runRecordSchema.safeParse(
+        createRun({
+          status: "COMPLETED",
+          schemaValidation: "passed",
+          consistencyValidation: "passed",
+          trustStatus: "HUMAN_CONFIRMED",
+          artifactState: "published",
+        }),
+      ).success,
+    ).toBe(true);
+  });
+
+  it("accepts ordinary bounded JSON evidence and human review", () => {
+    expect(
+      runRecordSchema.safeParse({
+        ...createRun(),
+        providerSnapshot: createProviderSnapshot({
+          confirmedQuantity: 500,
+          notes: ["Reviewed", null],
+        }),
+        humanReview: { confirmed: true, corrections: [] },
+      }).success,
+    ).toBe(true);
+  });
+
+  it("requires structuredResult and rejects an explicitly undefined human review", () => {
+    expect(
+      runRecordSchema.safeParse({
+        ...createRun(),
+        providerSnapshot: {
+          callId: "provider-call-001",
+          status: "completed",
+          observedAt: "2026-08-08T12:00:30.000Z",
+          taskCompleted: true,
+          completionConfidence: { score: 1, label: "certain" },
+          transcript: [{ speaker: "user", text: "Complete" }],
+          evidence: [
+            { id: "evidence-001", excerpt: "Complete", turnIndexes: [0] },
+          ],
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      runRecordSchema.safeParse({
+        ...createRun(),
+        humanReview: undefined,
+      }).success,
+    ).toBe(false);
+  });
+
+  it.each([
+    ["a function", () => ({ value: () => undefined })],
+    ["a symbol", () => ({ value: Symbol("invalid") })],
+    ["a bigint", () => ({ value: BigInt(1) })],
+    ["an undefined nested value", () => ({ value: undefined })],
+    ["a non-finite number", () => ({ value: Number.POSITIVE_INFINITY })],
+    [
+      "a cycle",
+      () => {
+        const cyclic: { self?: unknown } = {};
+        cyclic.self = cyclic;
+        return cyclic;
+      },
+    ],
+    ["a non-plain object", () => new Date("2026-08-08T12:00:00.000Z")],
+    [
+      "excessive nesting",
+      () => {
+        let nested: unknown = "leaf";
+        for (let index = 0; index < 16; index += 1) {
+          nested = { nested };
+        }
+        return nested;
+      },
+    ],
+    ["too many array entries", () => Array.from({ length: 1_000 }, () => 0)],
+    [
+      "too many object entries",
+      () =>
+        Object.fromEntries(
+          Array.from({ length: 1_000 }, (_, index) => [index, 0]),
+        ),
+    ],
+    ["an overlong key", () => ({ ["k".repeat(1_000)]: "value" })],
+    ["an overlong string", () => "x".repeat(10_000)],
+    [
+      "an excessive serialized value",
+      () => Array.from({ length: 16 }, () => "x".repeat(4_000)),
+    ],
+  ] as const)(
+    "rejects %s from both persisted unknown-value fields",
+    (_reason, createValue) => {
       expect(
-        runRecordSchema.safeParse(
-          createRun({
-            status: "COMPLETED",
-            schemaValidation: "passed",
-            consistencyValidation: "passed",
-            trustStatus: "HUMAN_CONFIRMED",
-            artifactState,
-          }),
-        ).success,
-      ).toBe(true);
+        runRecordSchema.safeParse({
+          ...createRun(),
+          providerSnapshot: createProviderSnapshot(createValue()),
+          humanReview: { reviewed: true },
+        }).success,
+      ).toBe(false);
+      expect(
+        runRecordSchema.safeParse({
+          ...createRun(),
+          providerSnapshot: createProviderSnapshot({ confirmedQuantity: 500 }),
+          humanReview: createValue(),
+        }).success,
+      ).toBe(false);
     },
   );
 
