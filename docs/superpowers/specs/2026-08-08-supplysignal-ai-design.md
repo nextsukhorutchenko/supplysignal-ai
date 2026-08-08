@@ -78,7 +78,15 @@ The domain layer defines purchase orders, call authorization, supplier responses
 
 ### 4.2 CALL-E adapter
 
-The vertical slice integrates through the documented CALL-E REST API and its published OpenAPI contract. It does not depend on CLI login or MCP execution. The adapter uses a stable, run-derived `Idempotency-Key` for call creation and pins the reviewed API contract or client version used by the implementation.
+The vertical slice integrates through the CALL-E Developer REST API described by OpenAPI contract version `0.6.0`. It does not depend on CLI login or MCP execution. The implementation records the reviewed contract version and validates the required contract surface with fixtures.
+
+The only CALL-E runtime endpoints in scope are:
+
+- `POST /v1/calls` to create one asynchronous call;
+- `GET /v1/calls/{call_id}` to read the authoritative call resource; and
+- `GET /v1/calls/{call_id}/events` to populate a bounded operator timeline.
+
+The events endpoint is informational and is not an authoritative completion source. The adapter uses a stable, run-derived `Idempotency-Key` for call creation. Reusing the key with the same request must return the original call; an idempotency conflict is a typed failure and must not trigger a new key automatically.
 
 The CALL-E adapter:
 
@@ -89,7 +97,7 @@ The CALL-E adapter:
 - uses neither batch dispatch nor webhooks in the vertical slice; and
 - never implements application-level automatic redialing.
 
-The requested structured-result schema uses explicit required fields and avoids nullable union types. Provider-specific schema constraints are covered by contract fixtures before any live call.
+The one recipient is submitted in E.164 format with `region: "US"` and `locale: "en-US"`. The requested `recipient_result_schema` uses explicit required fields, `additionalProperties: false`, bounded strings and numbers, explicit `unknown` enum values when absence must be represented, and no nullable union types. Provider-specific schema constraints are covered by contract fixtures before any live call.
 
 ### 4.3 Run state machine
 
@@ -106,6 +114,16 @@ The run lifecycle consists of:
 - `FAILED`.
 
 An SDK or network timeout does not prove that a call failed. When a call may have been created, the application moves to `RECONCILING` and polls the stored identifier. It must not create another call.
+
+CALL-E `CallStatus` values map into application states as follows:
+
+- provider `queued` maps to `CALL_STARTING`;
+- provider `in_progress` maps to `CALL_IN_PROGRESS`;
+- provider `completed` maps to `PROVIDER_REPORTED_TERMINAL`, never directly to application `COMPLETED`;
+- provider `failed` maps to `FAILED` after the bounded provider error is recorded; and
+- provider `canceled` maps to `FAILED` without claiming that the business task succeeded or that no dial attempt occurred.
+
+Unknown provider status values fail closed as `OUTCOME_UNKNOWN`. Recipient and attempt statuses are retained as evidence but cannot independently complete a run.
 
 ### 4.4 Deterministic validator
 
@@ -167,6 +185,8 @@ Each run has one trust status:
 - `OUTCOME_UNKNOWN`.
 
 A run may reach `COMPLETED` only after strict schema validation, consistency validation, and explicit human confirmation. Missing transcripts, delayed calls, contradictory evidence, unusable audio, or implausible terminal results prevent completion.
+
+Provider `task_completed` and `completion_confidence` values are advisory evidence only. Neither value, alone or together, can produce `CONSISTENCY_CHECK_PASSED`, `HUMAN_CONFIRMED`, or application `COMPLETED`.
 
 ## 8. Error contract
 
@@ -256,7 +276,15 @@ Required CI is deterministic, offline, credential-free, and based on committed s
 
 Live CALL-E and OpenAI checks are manual, bounded, explicitly environment-gated, and reported separately from required CI.
 
-## 14. Repository and release
+## 14. Optional operator tooling
+
+The portable CALL-E skill, `@call-e/cli`, and MCP tools `plan_call`, `run_call`, and `get_call_run` may be installed globally for manual setup verification or an explicitly authorized preflight. They are not application dependencies, CI dependencies, deployment dependencies, or runtime integration paths.
+
+CLI authentication uses its browser OAuth flow and local cache. The cache remains outside the repository and is never copied into deployment. On Windows, operator documentation must use native PowerShell environment-variable syntax instead of copying the installation guide's Unix `env` command form.
+
+Setup verification may check authentication and tool availability but must not place a call. Any preflight call remains subject to the same run-specific consent and authorization boundary as an application call.
+
+## 15. Repository and release
 
 The project resides in `D:\2026 AI\SupplySignal AI` and is published as the public repository `nextsukhorutchenko/supplysignal-ai` with an Apache 2.0 license. Code, documentation, tests, UI text, commits, and repository artifacts are written in English.
 
@@ -276,7 +304,7 @@ Before submission, the project requires:
 
 Consent evidence remains private and must not contain publicly exposed personal data.
 
-## 15. Acceptance criteria
+## 16. Acceptance criteria
 
 The vertical slice is accepted only when all of the following are true:
 
@@ -292,3 +320,5 @@ The vertical slice is accepted only when all of the following are true:
 10. Required CI passes without secrets, live services, or mutable external dependencies.
 11. The three-call preflight is documented truthfully before the final demo.
 12. The public replay and video contain no unapproved personal information or credentials.
+13. The runtime integration conforms to the reviewed CALL-E OpenAPI `0.6.0` surface, uses `US` and `en-US`, and fails closed on unknown provider status values.
+14. CLI, MCP, OAuth cache, and the portable CALL-E skill are absent from required application runtime, CI, and hosted replay deployment.
