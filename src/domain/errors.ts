@@ -12,3 +12,10 @@ export const APP_ERROR_CODES = [
 ] as const;
 
 export type AppErrorCode = (typeof APP_ERROR_CODES)[number];
+
+export class AppError extends Error {
+  constructor(readonly code: AppErrorCode) {
+    super(code);
+    this.name = "AppError";
+  }
+}
