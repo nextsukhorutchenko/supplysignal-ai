@@ -398,9 +398,11 @@ export const APP_ERROR_CODES = [
 
 - [ ] **Step 4: Run focused and coverage tests**
 
-Run: `pnpm vitest run src/domain/*.test.ts`
+Correction A6 (approved 2026-08-08): PowerShell does not expand the original `src/domain/*.test.ts` argument and Vitest treats it as a literal filter. Preserve that failed invocation in the Task 2 report, then use the explicit cross-platform file list below for both commands.
 
-Run: `pnpm vitest run --coverage src/domain/*.test.ts`
+Run: `pnpm vitest run src/domain/purchase-order.test.ts src/domain/call-recipient.test.ts src/domain/supplier-response.test.ts src/domain/risk.test.ts`
+
+Run: `pnpm vitest run --coverage src/domain/purchase-order.test.ts src/domain/call-recipient.test.ts src/domain/supplier-response.test.ts src/domain/risk.test.ts`
 
 Expected: PASS with branch coverage for every risk rule.
 
