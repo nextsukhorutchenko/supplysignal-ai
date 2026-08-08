@@ -135,6 +135,49 @@ describe("transitionRun", () => {
 });
 
 describe("runRecordSchema", () => {
+  it.each([
+    ["schema validation did not pass", { schemaValidation: "failed" }],
+    [
+      "consistency validation did not pass",
+      { consistencyValidation: "failed" },
+    ],
+    [
+      "human confirmation is absent",
+      { trustStatus: "CONSISTENCY_CHECK_PASSED" },
+    ],
+    ["artifacts are not ready or published", { artifactState: "none" }],
+  ] as const)("rejects a completed record when %s", (_reason, overrides) => {
+    expect(
+      runRecordSchema.safeParse(
+        createRun({
+          status: "COMPLETED",
+          schemaValidation: "passed",
+          consistencyValidation: "passed",
+          trustStatus: "HUMAN_CONFIRMED",
+          artifactState: "ready",
+          ...overrides,
+        }),
+      ).success,
+    ).toBe(false);
+  });
+
+  it.each(["ready", "published"] as const)(
+    "accepts a completed record with %s artifacts after all completion checks",
+    (artifactState) => {
+      expect(
+        runRecordSchema.safeParse(
+          createRun({
+            status: "COMPLETED",
+            schemaValidation: "passed",
+            consistencyValidation: "passed",
+            trustStatus: "HUMAN_CONFIRMED",
+            artifactState,
+          }),
+        ).success,
+      ).toBe(true);
+    },
+  );
+
   it("rejects unknown keys and bounded-field violations", () => {
     expect(
       runRecordSchema.safeParse({ ...createRun(), unexpected: true }),

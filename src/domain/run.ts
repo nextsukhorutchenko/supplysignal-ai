@@ -124,31 +124,52 @@ export const providerEvidenceSnapshotSchema: z.ZodType<ProviderEvidenceSnapshot>
       .readonly(),
   });
 
-export const runRecordSchema: z.ZodType<RunRecord> = z.strictObject({
-  id: z.string().trim().min(1).max(MAX_RUN_ID_LENGTH),
-  version: z.number().int().nonnegative(),
-  status: runStatusSchema,
-  trustStatus: trustStatusSchema,
-  order: purchaseOrderSchema,
-  recipient: callRecipientSchema,
-  authorization: callAuthorizationSchema.optional(),
-  idempotencyKey: z
-    .string()
-    .trim()
-    .min(1)
-    .max(MAX_IDENTIFIER_LENGTH)
-    .optional(),
-  requestDigest: z.string().trim().min(1).max(MAX_IDENTIFIER_LENGTH).optional(),
-  callId: z.string().trim().min(1).max(MAX_CALL_ID_LENGTH).optional(),
-  providerSnapshot: providerEvidenceSnapshotSchema.optional(),
-  schemaValidation: z.enum(["not_run", "passed", "failed"]),
-  consistencyValidation: z.enum(["not_run", "passed", "failed"]),
-  humanReview: z.unknown().optional(),
-  risk: supplyRiskSchema.optional(),
-  artifactState: z.enum(["none", "ready", "published", "failed"]),
-  createdAt: isoTimestampSchema,
-  updatedAt: isoTimestampSchema,
-});
+export const runRecordSchema: z.ZodType<RunRecord> = z
+  .strictObject({
+    id: z.string().trim().min(1).max(MAX_RUN_ID_LENGTH),
+    version: z.number().int().nonnegative(),
+    status: runStatusSchema,
+    trustStatus: trustStatusSchema,
+    order: purchaseOrderSchema,
+    recipient: callRecipientSchema,
+    authorization: callAuthorizationSchema.optional(),
+    idempotencyKey: z
+      .string()
+      .trim()
+      .min(1)
+      .max(MAX_IDENTIFIER_LENGTH)
+      .optional(),
+    requestDigest: z
+      .string()
+      .trim()
+      .min(1)
+      .max(MAX_IDENTIFIER_LENGTH)
+      .optional(),
+    callId: z.string().trim().min(1).max(MAX_CALL_ID_LENGTH).optional(),
+    providerSnapshot: providerEvidenceSnapshotSchema.optional(),
+    schemaValidation: z.enum(["not_run", "passed", "failed"]),
+    consistencyValidation: z.enum(["not_run", "passed", "failed"]),
+    humanReview: z.unknown().optional(),
+    risk: supplyRiskSchema.optional(),
+    artifactState: z.enum(["none", "ready", "published", "failed"]),
+    createdAt: isoTimestampSchema,
+    updatedAt: isoTimestampSchema,
+  })
+  .superRefine((run, context) => {
+    if (
+      run.status === "COMPLETED" &&
+      (run.schemaValidation !== "passed" ||
+        run.consistencyValidation !== "passed" ||
+        run.trustStatus !== "HUMAN_CONFIRMED" ||
+        (run.artifactState !== "ready" && run.artifactState !== "published"))
+    ) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "Completed runs require validated, human-confirmed ready artifacts",
+      });
+    }
+  });
 
 const ALLOWED_TRANSITIONS: Readonly<Record<RunStatus, readonly RunStatus[]>> = {
   DRAFT: ["AWAITING_APPROVAL"],
