@@ -1,4 +1,14 @@
-import { lstat, mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
+import {
+  link,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -10,20 +20,13 @@ import { FileRunStore } from "./run-store.js";
 
 const fixedNow = "2026-08-08T12:00:00.000Z";
 const privatePhone = "+12025550123";
+const VERSION_ZERO = "run-001.v0000000000000000.json";
+const VERSION_ONE = "run-001.v0000000000000001.json";
 
-class MutableClock implements Clock {
-  constructor(private current = fixedNow) {}
-
-  now(): string {
-    return this.current;
-  }
-
-  set(value: string): void {
-    this.current = value;
-  }
-
-  async sleep(): Promise<void> {}
-}
+const clock: Clock = {
+  now: () => fixedNow,
+  sleep: async () => undefined,
+};
 
 function createRun(overrides: Partial<RunRecord> = {}): RunRecord {
   return {
@@ -53,12 +56,24 @@ function createRun(overrides: Partial<RunRecord> = {}): RunRecord {
   };
 }
 
-const roots: string[] = [];
+function versionFileName(runId: string, version: number): string {
+  return `${runId}.v${String(version).padStart(16, "0")}.json`;
+}
+
+const cleanupPaths: string[] = [];
 
 async function createRoot(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "supplysignal-run-store-"));
-  roots.push(root);
+  cleanupPaths.push(root);
   return root;
+}
+
+async function createOutsideFile(content: string): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), "supplysignal-outside-"));
+  cleanupPaths.push(directory);
+  const path = join(directory, "private.json");
+  await writeFile(path, content, "utf8");
+  return path;
 }
 
 async function expectBoundedFailure(
@@ -84,16 +99,17 @@ async function auxiliaryFiles(root: string): Promise<string[]> {
 }
 
 afterEach(async () => {
-  const { rm } = await import("node:fs/promises");
   await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
+    cleanupPaths
+      .splice(0)
+      .map((path) => rm(path, { recursive: true, force: true })),
   );
 });
 
 describe("FileRunStore", () => {
-  it("creates and reads a strictly validated detached record", async () => {
+  it("publishes immutable version zero and reads a detached record", async () => {
     const root = await createRoot();
-    const store = new FileRunStore({ root, clock: new MutableClock() });
+    const store = new FileRunStore({ root, clock });
     const run = createRun();
 
     await store.create(run);
@@ -103,6 +119,7 @@ describe("FileRunStore", () => {
     expect(stored.order.supplierName).toBe("Northstar Components");
     expect(stored).not.toBe(run);
     expect(stored.order).not.toBe(run.order);
+    expect(await readdir(root)).toEqual([VERSION_ZERO]);
     expect(await auxiliaryFiles(root)).toEqual([]);
   });
 
@@ -120,37 +137,31 @@ describe("FileRunStore", () => {
     `r${"x".repeat(64)}`,
   ])("rejects invalid run id %j before deriving a path", async (runId) => {
     const root = await createRoot();
-    const store = new FileRunStore({ root, clock: new MutableClock() });
-    const outside = `${root}-escape.json`;
-    await writeFile(outside, "outside", "utf8");
+    const store = new FileRunStore({ root, clock });
+    const outside = await createOutsideFile("outside");
 
     await expectBoundedFailure(store.read(runId), "RUN_STORE_INVALID_ID", root);
     expect(await readdir(root)).toEqual([]);
-    expect(
-      await import("node:fs/promises").then(({ readFile }) =>
-        readFile(outside, "utf8"),
-      ),
-    ).toBe("outside");
-    await import("node:fs/promises").then(({ rm }) => rm(outside));
+    expect(await readFile(outside, "utf8")).toBe("outside");
   });
 
   it("stores a grammar-valid device-like id as a regular confined file", async () => {
     const root = await createRoot();
-    const store = new FileRunStore({ root, clock: new MutableClock() });
+    const store = new FileRunStore({ root, clock });
 
     await store.create(createRun({ id: "con" }));
 
     expect((await store.read("con")).id).toBe("con");
     const files = await readdir(root);
-    expect(files).toHaveLength(1);
+    expect(files).toEqual(["con.v0000000000000000.json"]);
     expect((await lstat(join(root, files[0] ?? "missing"))).isFile()).toBe(
       true,
     );
   });
 
-  it("never overwrites an existing run", async () => {
+  it("never overwrites immutable version zero", async () => {
     const root = await createRoot();
-    const store = new FileRunStore({ root, clock: new MutableClock() });
+    const store = new FileRunStore({ root, clock });
     await store.create(createRun());
 
     await expectBoundedFailure(
@@ -169,27 +180,15 @@ describe("FileRunStore", () => {
     expect((await store.read("run-001")).order.supplierName).toBe(
       "Northstar Components",
     );
-    expect(await auxiliaryFiles(root)).toEqual([]);
+    expect(await readdir(root)).toEqual([VERSION_ZERO]);
   });
 
-  it("rejects schema-invalid records before writing", async () => {
+  it("rejects schema-invalid and accessor-backed records before writing", async () => {
     const root = await createRoot();
-    const store = new FileRunStore({ root, clock: new MutableClock() });
-
-    await expectBoundedFailure(
-      store.create(createRun({ status: "INVALID" as RunRecord["status"] })),
-      "RUN_STORE_INVALID_RECORD",
-      root,
-    );
-    expect(await readdir(root)).toEqual([]);
-  });
-
-  it("rejects an accessor-backed record without reading its run id", async () => {
-    const root = await createRoot();
-    const store = new FileRunStore({ root, clock: new MutableClock() });
-    const run = createRun();
+    const store = new FileRunStore({ root, clock });
+    const accessorRun = createRun();
     let getterCalls = 0;
-    Object.defineProperty(run, "id", {
+    Object.defineProperty(accessorRun, "id", {
       enumerable: true,
       get() {
         getterCalls += 1;
@@ -198,7 +197,12 @@ describe("FileRunStore", () => {
     });
 
     await expectBoundedFailure(
-      store.create(run),
+      store.create(createRun({ status: "INVALID" as RunRecord["status"] })),
+      "RUN_STORE_INVALID_RECORD",
+      root,
+    );
+    await expectBoundedFailure(
+      store.create(accessorRun),
       "RUN_STORE_INVALID_RECORD",
       root,
     );
@@ -206,10 +210,62 @@ describe("FileRunStore", () => {
     expect(await readdir(root)).toEqual([]);
   });
 
-  it("bounds malformed and schema-invalid stored data without exposing it", async () => {
+  it("fails closed when record proxy reflection throws", async () => {
     const root = await createRoot();
-    const store = new FileRunStore({ root, clock: new MutableClock() });
-    await writeFile(join(root, "run-001.json"), `{${privatePhone}`, "utf8");
+    const store = new FileRunStore({ root, clock });
+    const proxied = new Proxy(createRun(), {
+      ownKeys() {
+        throw new Error(`${privatePhone} proxy trap`);
+      },
+    });
+
+    await expectBoundedFailure(
+      store.create(proxied),
+      "RUN_STORE_INVALID_RECORD",
+      root,
+    );
+    expect(await readdir(root)).toEqual([]);
+  });
+
+  it("fails closed on malformed JSON, schema corruption, and oversized data", async () => {
+    const root = await createRoot();
+    const store = new FileRunStore({ root, clock });
+    const path = join(root, VERSION_ZERO);
+
+    await writeFile(path, `{${privatePhone}`, "utf8");
+    await expectBoundedFailure(
+      store.read("run-001"),
+      "RUN_STORE_READ_FAILED",
+      root,
+    );
+
+    await writeFile(
+      path,
+      JSON.stringify({ ...createRun(), unexpected: privatePhone }),
+      "utf8",
+    );
+    await expectBoundedFailure(
+      store.read("run-001"),
+      "RUN_STORE_READ_FAILED",
+      root,
+    );
+
+    await writeFile(path, "x".repeat(1_048_577), "utf8");
+    await expectBoundedFailure(
+      store.read("run-001"),
+      "RUN_STORE_READ_FAILED",
+      root,
+    );
+  });
+
+  it("rejects gaps and a missing version-zero start", async () => {
+    const root = await createRoot();
+    const store = new FileRunStore({ root, clock });
+    await writeFile(
+      join(root, versionFileName("run-001", 1)),
+      JSON.stringify(createRun({ version: 1 })),
+      "utf8",
+    );
 
     await expectBoundedFailure(
       store.read("run-001"),
@@ -218,8 +274,14 @@ describe("FileRunStore", () => {
     );
 
     await writeFile(
-      join(root, "run-001.json"),
-      JSON.stringify({ ...createRun(), unexpected: privatePhone }),
+      join(root, VERSION_ZERO),
+      JSON.stringify(createRun()),
+      "utf8",
+    );
+    await rm(join(root, versionFileName("run-001", 1)));
+    await writeFile(
+      join(root, versionFileName("run-001", 2)),
+      JSON.stringify(createRun({ version: 2 })),
       "utf8",
     );
     await expectBoundedFailure(
@@ -229,10 +291,19 @@ describe("FileRunStore", () => {
     );
   });
 
-  it("rejects oversized stored data before JSON parsing", async () => {
+  it("rejects malformed version filenames for the requested run", async () => {
     const root = await createRoot();
-    const store = new FileRunStore({ root, clock: new MutableClock() });
-    await writeFile(join(root, "run-001.json"), "x".repeat(1_048_577), "utf8");
+    const store = new FileRunStore({ root, clock });
+    await writeFile(
+      join(root, VERSION_ZERO),
+      JSON.stringify(createRun()),
+      "utf8",
+    );
+    await writeFile(
+      join(root, "run-001.v1.json"),
+      JSON.stringify(createRun({ version: 1 })),
+      "utf8",
+    );
 
     await expectBoundedFailure(
       store.read("run-001"),
@@ -241,9 +312,67 @@ describe("FileRunStore", () => {
     );
   });
 
-  it("rejects stale versions, id mismatches, and next-version mismatches", async () => {
+  it.each([
+    ["record id", createRun({ id: "run-002" })],
+    ["record version", createRun({ version: 7 })],
+  ] as const)("rejects a filename-to-%s mismatch", async (_name, record) => {
     const root = await createRoot();
-    const store = new FileRunStore({ root, clock: new MutableClock() });
+    const store = new FileRunStore({ root, clock });
+    await writeFile(join(root, VERSION_ZERO), JSON.stringify(record), "utf8");
+
+    await expectBoundedFailure(
+      store.read("run-001"),
+      "RUN_STORE_READ_FAILED",
+      root,
+    );
+  });
+
+  it("fails closed above 1024 matching version files", async () => {
+    const root = await createRoot();
+    const store = new FileRunStore({ root, clock });
+    const writes: Promise<void>[] = [];
+    for (let version = 0; version < 1_025; version += 1) {
+      writes.push(
+        writeFile(
+          join(root, versionFileName("run-001", version)),
+          JSON.stringify(createRun({ version })),
+          "utf8",
+        ),
+      );
+    }
+    await Promise.all(writes);
+
+    await expectBoundedFailure(
+      store.read("run-001"),
+      "RUN_STORE_READ_FAILED",
+      root,
+    );
+  });
+
+  it("publishes expectedVersion plus one without modifying prior versions", async () => {
+    const root = await createRoot();
+    const store = new FileRunStore({ root, clock });
+    await store.create(createRun());
+    const originalVersionZero = await readFile(
+      join(root, VERSION_ZERO),
+      "utf8",
+    );
+    const next = createRun({ version: 1, status: "AWAITING_APPROVAL" });
+
+    const result = await store.compareAndSwap("run-001", 0, next);
+
+    expect(result).toMatchObject({ version: 1, status: "AWAITING_APPROVAL" });
+    expect(await readFile(join(root, VERSION_ZERO), "utf8")).toBe(
+      originalVersionZero,
+    );
+    expect((await store.read("run-001")).version).toBe(1);
+    expect((await readdir(root)).sort()).toEqual([VERSION_ZERO, VERSION_ONE]);
+    expect(await auxiliaryFiles(root)).toEqual([]);
+  });
+
+  it("rejects stale expectations, id mismatches, and next-version mismatches", async () => {
+    const root = await createRoot();
+    const store = new FileRunStore({ root, clock });
     await store.create(createRun());
 
     await expectBoundedFailure(
@@ -270,109 +399,75 @@ describe("FileRunStore", () => {
       root,
     );
     expect((await store.read("run-001")).version).toBe(0);
-    expect(await auxiliaryFiles(root)).toEqual([]);
   });
 
-  it("atomically replaces a matching version and returns a detached record", async () => {
+  it("ignores a crash-before-link temporary file", async () => {
     const root = await createRoot();
-    const store = new FileRunStore({ root, clock: new MutableClock() });
-    await store.create(createRun());
-    const next = createRun({ version: 1, status: "AWAITING_APPROVAL" });
-
-    const result = await store.compareAndSwap("run-001", 0, next);
-    next.order.supplierName = "Mutated next value";
-    result.order.purchaseOrderRef = "Mutated returned value";
-
-    const stored = await store.read("run-001");
-    expect(stored).toMatchObject({ version: 1, status: "AWAITING_APPROVAL" });
-    expect(stored.order.supplierName).toBe("Northstar Components");
-    expect(stored.order.purchaseOrderRef).toBe("PO-2048");
-    expect(await auxiliaryFiles(root)).toEqual([]);
-  });
-
-  it("ignores an interrupted temporary file as non-authoritative", async () => {
-    const root = await createRoot();
-    const store = new FileRunStore({ root, clock: new MutableClock() });
+    const store = new FileRunStore({ root, clock });
     await store.create(createRun());
     await writeFile(
-      join(root, "run-001.interrupted.tmp"),
-      JSON.stringify({ ...createRun(), version: 99 }),
+      join(root, `run-001.${"a".repeat(32)}.tmp`),
+      JSON.stringify(createRun({ version: 99 })),
       "utf8",
     );
 
     expect((await store.read("run-001")).version).toBe(0);
   });
 
-  it("recovers one strictly valid stale lock using only the injected clock", async () => {
+  it("treats a crash-after-link version as committed", async () => {
     const root = await createRoot();
-    const clock = new MutableClock("2026-08-08T12:01:00.000Z");
     const store = new FileRunStore({ root, clock });
-    await store.create(createRun());
-    await writeFile(
-      join(root, "run-001.lock"),
-      JSON.stringify({
-        version: 1,
-        createdAt: "2026-08-08T12:00:00.000Z",
-        token: "a".repeat(32),
-      }),
-      "utf8",
-    );
+    const temporaryPath = join(root, `run-001.${"b".repeat(32)}.tmp`);
+    await writeFile(temporaryPath, JSON.stringify(createRun()), "utf8");
+    await link(temporaryPath, join(root, VERSION_ZERO));
 
-    const result = await store.compareAndSwap(
-      "run-001",
-      0,
-      createRun({ version: 1, status: "AWAITING_APPROVAL" }),
-    );
-
-    expect(result.version).toBe(1);
-    expect(await auxiliaryFiles(root)).toEqual([]);
+    expect((await store.read("run-001")).version).toBe(0);
   });
 
-  it("fails closed on a fresh or malformed lock without removing it", async () => {
+  it("rejects a symlink candidate without reading its outside target", async () => {
     const root = await createRoot();
-    const clock = new MutableClock();
     const store = new FileRunStore({ root, clock });
-    await store.create(createRun());
-    const lockPath = join(root, "run-001.lock");
-    await writeFile(
-      lockPath,
-      JSON.stringify({
-        version: 1,
-        createdAt: fixedNow,
-        token: "b".repeat(32),
-      }),
-      "utf8",
-    );
+    const outside = await createOutsideFile(JSON.stringify(createRun()));
+    try {
+      await symlink(outside, join(root, VERSION_ZERO), "file");
+    } catch (error: unknown) {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        (error as { code?: unknown }).code === "EPERM"
+      ) {
+        console.warn("Symlink regression unavailable: Windows returned EPERM");
+        return;
+      }
+      throw error;
+    }
 
     await expectBoundedFailure(
-      store.compareAndSwap(
-        "run-001",
-        0,
-        createRun({ version: 1, status: "AWAITING_APPROVAL" }),
-      ),
-      "RUN_STORE_LOCKED",
+      store.read("run-001"),
+      "RUN_STORE_READ_FAILED",
       root,
     );
-    expect(await readdir(root)).toContain("run-001.lock");
-
-    await writeFile(lockPath, `{"createdAt":"${privatePhone}"}`, "utf8");
-    clock.set("2027-08-08T12:00:00.000Z");
-    await expectBoundedFailure(
-      store.compareAndSwap(
-        "run-001",
-        0,
-        createRun({ version: 1, status: "AWAITING_APPROVAL" }),
-      ),
-      "RUN_STORE_LOCKED",
-      root,
-    );
-    expect(await readdir(root)).toContain("run-001.lock");
   });
 
-  it("cleans its temporary file when create-only placement fails", async () => {
+  it("rejects a hard-link candidate to an outside-root file", async () => {
     const root = await createRoot();
-    await mkdir(join(root, "run-001.json"));
-    const store = new FileRunStore({ root, clock: new MutableClock() });
+    const store = new FileRunStore({ root, clock });
+    const outside = await createOutsideFile(JSON.stringify(createRun()));
+    await link(outside, join(root, VERSION_ZERO));
+
+    await expectBoundedFailure(
+      store.read("run-001"),
+      "RUN_STORE_READ_FAILED",
+      root,
+    );
+    expect(await readFile(outside, "utf8")).toContain("run-001");
+  });
+
+  it("cleans its temporary file when create-only publication fails", async () => {
+    const root = await createRoot();
+    await mkdir(join(root, VERSION_ZERO));
+    const store = new FileRunStore({ root, clock });
 
     await expectBoundedFailure(
       store.create(createRun()),

@@ -1,9 +1,12 @@
 import { randomBytes } from "node:crypto";
+import { constants, type BigIntStats } from "node:fs";
 import {
   link,
+  lstat,
   mkdir,
   open,
-  rename,
+  opendir,
+  realpath,
   unlink,
   type FileHandle,
 } from "node:fs/promises";
@@ -13,12 +16,12 @@ import type { Clock, RunStore } from "../../application/ports.js";
 import { runRecordSchema, type RunRecord } from "../../domain/run.js";
 
 const RUN_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const TEMP_TOKEN = /^[a-f0-9]{32}$/;
 const MAX_RUN_FILE_BYTES = 1_048_576;
-const MAX_LOCK_FILE_BYTES = 512;
-const STALE_LOCK_MILLISECONDS = 30_000;
-const LOCK_VERSION = 1;
-const TOKEN = /^[a-f0-9]{32}$/;
-const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const MAX_VERSION_FILES = 1_024;
+const MAX_TEMP_FILES = 1_024;
+const VERSION_DIGITS = 16;
+const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
 
 type RunStoreFailureCode =
   | "RUN_STORE_INVALID_ROOT"
@@ -27,13 +30,16 @@ type RunStoreFailureCode =
   | "RUN_STORE_ALREADY_EXISTS"
   | "RUN_STORE_READ_FAILED"
   | "RUN_STORE_WRITE_FAILED"
-  | "RUN_STORE_CONFLICT"
-  | "RUN_STORE_LOCKED";
+  | "RUN_STORE_CONFLICT";
 
-type LockRecord = {
-  version: typeof LOCK_VERSION;
-  createdAt: string;
-  token: string;
+type VersionCandidate = {
+  path: string;
+  version: number;
+};
+
+type ScanResult = {
+  candidates: VersionCandidate[];
+  temporaryPaths: string[];
 };
 
 class RunStoreFailure extends Error {
@@ -63,84 +69,11 @@ function preserveOrFail(error: unknown, fallback: RunStoreFailureCode): never {
   fail(fallback);
 }
 
-function randomToken(failureCode: RunStoreFailureCode): string {
+function randomToken(): string {
   try {
     return randomBytes(16).toString("hex");
   } catch {
-    fail(failureCode);
-  }
-}
-
-function parseTimestamp(value: string): number | null {
-  if (!ISO_TIMESTAMP.test(value)) {
-    return null;
-  }
-  const milliseconds = Date.parse(value);
-  if (
-    !Number.isFinite(milliseconds) ||
-    new Date(milliseconds).toISOString() !== value
-  ) {
-    return null;
-  }
-  return milliseconds;
-}
-
-function parseLockRecord(value: unknown): LockRecord | null {
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    Array.isArray(value) ||
-    Object.getPrototypeOf(value) !== Object.prototype
-  ) {
-    return null;
-  }
-
-  const descriptors = Object.getOwnPropertyDescriptors(value);
-  const keys = Object.keys(descriptors).sort();
-  if (
-    keys.length !== 3 ||
-    keys[0] !== "createdAt" ||
-    keys[1] !== "token" ||
-    keys[2] !== "version"
-  ) {
-    return null;
-  }
-
-  for (const descriptor of Object.values(descriptors)) {
-    if (
-      !descriptor.enumerable ||
-      !("value" in descriptor) ||
-      descriptor.get !== undefined ||
-      descriptor.set !== undefined
-    ) {
-      return null;
-    }
-  }
-
-  const version = descriptors.version?.value;
-  const createdAt = descriptors.createdAt?.value;
-  const token = descriptors.token?.value;
-  if (
-    version !== LOCK_VERSION ||
-    typeof createdAt !== "string" ||
-    parseTimestamp(createdAt) === null ||
-    typeof token !== "string" ||
-    !TOKEN.test(token)
-  ) {
-    return null;
-  }
-
-  return { version, createdAt, token };
-}
-
-async function closeBestEffort(handle: FileHandle | undefined): Promise<void> {
-  if (handle === undefined) {
-    return;
-  }
-  try {
-    await handle.close();
-  } catch {
-    // The public operation maps any prior failure; cleanup never leaks details.
+    fail("RUN_STORE_WRITE_FAILED");
   }
 }
 
@@ -148,51 +81,55 @@ async function unlinkBestEffort(path: string): Promise<void> {
   try {
     await unlink(path);
   } catch {
-    // Temporary-file cleanup is deliberately best effort and bounded.
+    // Cleanup cannot change the bounded result of the public operation.
   }
 }
 
 async function writeExclusiveSynced(path: string, data: string): Promise<void> {
   let handle: FileHandle | undefined;
+  let operationError: unknown;
   try {
     handle = await open(path, "wx", 0o600);
     await handle.writeFile(data, "utf8");
     await handle.sync();
-  } finally {
-    await closeBestEffort(handle);
+  } catch (error: unknown) {
+    operationError = error;
+  }
+
+  if (handle !== undefined) {
+    try {
+      await handle.close();
+    } catch (error: unknown) {
+      operationError ??= error;
+    }
+  }
+
+  if (operationError !== undefined) {
+    throw operationError;
   }
 }
 
-async function readBounded(path: string, limit: number): Promise<string> {
-  let handle: FileHandle | undefined;
-  try {
-    handle = await open(path, "r");
-    const buffer = Buffer.alloc(limit + 1);
-    let offset = 0;
-    while (offset < buffer.length) {
-      const result = await handle.read(
-        buffer,
-        offset,
-        buffer.length - offset,
-        null,
-      );
-      if (result.bytesRead === 0) {
-        break;
-      }
-      offset += result.bytesRead;
-    }
-    if (offset > limit) {
-      throw new RunStoreFailure("RUN_STORE_READ_FAILED");
-    }
-    return buffer.subarray(0, offset).toString("utf8");
-  } finally {
-    await closeBestEffort(handle);
-  }
+function sameIdentity(first: BigIntStats, second: BigIntStats): boolean {
+  return first.dev === second.dev && first.ino === second.ino;
+}
+
+function unchangedFile(first: BigIntStats, second: BigIntStats): boolean {
+  return (
+    sameIdentity(first, second) &&
+    first.size === second.size &&
+    first.nlink === second.nlink &&
+    first.mtimeNs === second.mtimeNs &&
+    first.ctimeNs === second.ctimeNs
+  );
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export class FileRunStore implements RunStore {
-  readonly #root: string;
-  readonly #clock: Clock;
+  readonly #configuredRoot: string;
+  #canonicalRoot: string | undefined;
 
   constructor(options: { root: string; clock: Clock }) {
     if (
@@ -202,39 +139,31 @@ export class FileRunStore implements RunStore {
     ) {
       fail("RUN_STORE_INVALID_ROOT");
     }
-    this.#root = resolve(options.root);
-    this.#clock = options.clock;
+    this.#configuredRoot = resolve(options.root);
+    void options.clock;
   }
 
   async create(run: RunRecord): Promise<void> {
     const record = this.#validateRecord(run);
     const runId = this.#validateRunId(record.id);
-    const finalPath = this.#childPath(`${runId}.json`);
-    const temporaryPath = this.#temporaryPath(runId);
-
-    try {
-      await this.#ensureRoot();
-      await writeExclusiveSynced(temporaryPath, JSON.stringify(record));
-      try {
-        await link(temporaryPath, finalPath);
-      } catch (error: unknown) {
-        if (isNodeError(error, "EEXIST")) {
-          fail("RUN_STORE_ALREADY_EXISTS");
-        }
-        throw error;
-      }
-    } catch (error: unknown) {
-      preserveOrFail(error, "RUN_STORE_WRITE_FAILED");
-    } finally {
-      await unlinkBestEffort(temporaryPath);
+    if (record.version !== 0) {
+      fail("RUN_STORE_INVALID_RECORD");
     }
+
+    const root = await this.#ensureRoot("RUN_STORE_WRITE_FAILED");
+    await this.#publish(root, runId, 0, record, "RUN_STORE_ALREADY_EXISTS");
   }
 
   async read(runId: string): Promise<RunRecord> {
     const validRunId = this.#validateRunId(runId);
     try {
-      await this.#ensureRoot();
-      return await this.#readRecord(this.#childPath(`${validRunId}.json`));
+      const root = await this.#ensureRoot("RUN_STORE_READ_FAILED");
+      const records = await this.#readHistory(root, validRunId);
+      const latest = records.at(-1);
+      if (latest === undefined) {
+        fail("RUN_STORE_READ_FAILED");
+      }
+      return this.#validateRecord(latest);
     } catch (error: unknown) {
       preserveOrFail(error, "RUN_STORE_READ_FAILED");
     }
@@ -256,26 +185,28 @@ export class FileRunStore implements RunStore {
       fail("RUN_STORE_CONFLICT");
     }
 
-    await this.#ensureRoot();
-    const lockPath = this.#childPath(`${validRunId}.lock`);
-    const finalPath = this.#childPath(`${validRunId}.json`);
-    const temporaryPath = this.#temporaryPath(validRunId);
-    const token = await this.#acquireLock(lockPath);
-
     try {
-      const current = await this.#readRecord(finalPath);
-      if (current.id !== validRunId || current.version !== expectedVersion) {
+      const root = await this.#ensureRoot("RUN_STORE_WRITE_FAILED");
+      const records = await this.#readHistory(root, validRunId);
+      const current = records.at(-1);
+      if (
+        current === undefined ||
+        current.version !== expectedVersion ||
+        records.length >= MAX_VERSION_FILES
+      ) {
         fail("RUN_STORE_CONFLICT");
       }
 
-      await writeExclusiveSynced(temporaryPath, JSON.stringify(nextRecord));
-      await rename(temporaryPath, finalPath);
+      await this.#publish(
+        root,
+        validRunId,
+        expectedVersion + 1,
+        nextRecord,
+        "RUN_STORE_CONFLICT",
+      );
       return this.#validateRecord(nextRecord);
     } catch (error: unknown) {
       preserveOrFail(error, "RUN_STORE_WRITE_FAILED");
-    } finally {
-      await unlinkBestEffort(temporaryPath);
-      await this.#releaseLock(lockPath, token);
     }
   }
 
@@ -294,9 +225,9 @@ export class FileRunStore implements RunStore {
     return parsed.data;
   }
 
-  #childPath(fileName: string): string {
-    const child = resolve(this.#root, fileName);
-    const pathFromRoot = relative(this.#root, child);
+  #childPath(root: string, fileName: string): string {
+    const child = resolve(root, fileName);
+    const pathFromRoot = relative(root, child);
     if (
       pathFromRoot.length === 0 ||
       pathFromRoot.startsWith("..") ||
@@ -307,99 +238,251 @@ export class FileRunStore implements RunStore {
     return child;
   }
 
-  #temporaryPath(runId: string): string {
-    return this.#childPath(
-      `${runId}.${randomToken("RUN_STORE_WRITE_FAILED")}.tmp`,
-    );
+  #versionFileName(runId: string, version: number): string {
+    return `${runId}.v${String(version).padStart(VERSION_DIGITS, "0")}.json`;
   }
 
-  async #ensureRoot(): Promise<void> {
+  async #ensureRoot(
+    failureCode: "RUN_STORE_READ_FAILED" | "RUN_STORE_WRITE_FAILED",
+  ): Promise<string> {
     try {
-      await mkdir(this.#root, { recursive: true });
-    } catch {
-      fail("RUN_STORE_WRITE_FAILED");
+      await mkdir(this.#configuredRoot, { recursive: true });
+      const rootBefore = await lstat(this.#configuredRoot, { bigint: true });
+      if (!rootBefore.isDirectory() || rootBefore.isSymbolicLink()) {
+        fail("RUN_STORE_INVALID_ROOT");
+      }
+      const canonical = await realpath(this.#configuredRoot);
+      const rootAfter = await lstat(this.#configuredRoot, { bigint: true });
+      if (
+        !rootAfter.isDirectory() ||
+        rootAfter.isSymbolicLink() ||
+        !sameIdentity(rootBefore, rootAfter)
+      ) {
+        fail("RUN_STORE_INVALID_ROOT");
+      }
+      if (
+        this.#canonicalRoot !== undefined &&
+        this.#canonicalRoot !== canonical
+      ) {
+        fail("RUN_STORE_INVALID_ROOT");
+      }
+      this.#canonicalRoot = canonical;
+      return canonical;
+    } catch (error: unknown) {
+      if (error instanceof RunStoreFailure) {
+        throw error;
+      }
+      fail(failureCode);
     }
   }
 
-  async #readRecord(path: string): Promise<RunRecord> {
+  async #publish(
+    root: string,
+    runId: string,
+    version: number,
+    record: RunRecord,
+    conflictCode: "RUN_STORE_ALREADY_EXISTS" | "RUN_STORE_CONFLICT",
+  ): Promise<void> {
+    const finalPath = this.#childPath(
+      root,
+      this.#versionFileName(runId, version),
+    );
+    const temporaryPath = this.#childPath(
+      root,
+      `${runId}.${randomToken()}.tmp`,
+    );
+
     try {
-      const serialized = await readBounded(path, MAX_RUN_FILE_BYTES);
-      return this.#validateRecord(JSON.parse(serialized) as unknown);
+      await writeExclusiveSynced(temporaryPath, JSON.stringify(record));
+      try {
+        await link(temporaryPath, finalPath);
+      } catch (error: unknown) {
+        if (isNodeError(error, "EEXIST")) {
+          fail(conflictCode);
+        }
+        throw error;
+      }
+    } catch (error: unknown) {
+      preserveOrFail(error, "RUN_STORE_WRITE_FAILED");
+    } finally {
+      await unlinkBestEffort(temporaryPath);
+    }
+  }
+
+  async #scan(root: string, runId: string): Promise<ScanResult> {
+    const escapedId = escapeRegExp(runId);
+    const versionPattern = new RegExp(
+      `^${escapedId}\\.v(\\d{${VERSION_DIGITS}})\\.json$`,
+    );
+    const temporaryPattern = new RegExp(
+      `^${escapedId}\\.([a-f0-9]{32})\\.tmp$`,
+    );
+    const malformedVersionPrefix = `${runId}.v`;
+    const candidates: VersionCandidate[] = [];
+    const temporaryPaths: string[] = [];
+    const directory = await opendir(root);
+
+    try {
+      for await (const entry of directory) {
+        const versionMatch = versionPattern.exec(entry.name);
+        if (versionMatch !== null) {
+          candidates.push({
+            path: this.#childPath(root, entry.name),
+            version: Number(versionMatch[1]),
+          });
+          if (candidates.length > MAX_VERSION_FILES) {
+            fail("RUN_STORE_READ_FAILED");
+          }
+          continue;
+        }
+
+        if (entry.name.startsWith(malformedVersionPrefix)) {
+          fail("RUN_STORE_READ_FAILED");
+        }
+
+        const temporaryMatch = temporaryPattern.exec(entry.name);
+        if (
+          temporaryMatch !== null &&
+          TEMP_TOKEN.test(temporaryMatch[1] ?? "")
+        ) {
+          temporaryPaths.push(this.#childPath(root, entry.name));
+          if (temporaryPaths.length > MAX_TEMP_FILES) {
+            fail("RUN_STORE_READ_FAILED");
+          }
+        }
+      }
+    } finally {
+      await directory.close().catch(() => undefined);
+    }
+
+    candidates.sort((first, second) => first.version - second.version);
+    for (let index = 0; index < candidates.length; index += 1) {
+      const candidate = candidates[index];
+      if (
+        candidate === undefined ||
+        !Number.isSafeInteger(candidate.version) ||
+        candidate.version !== index
+      ) {
+        fail("RUN_STORE_READ_FAILED");
+      }
+    }
+    return { candidates, temporaryPaths };
+  }
+
+  async #readHistory(root: string, runId: string): Promise<RunRecord[]> {
+    try {
+      const scan = await this.#scan(root, runId);
+      if (scan.candidates.length === 0) {
+        fail("RUN_STORE_READ_FAILED");
+      }
+      const records: RunRecord[] = [];
+      for (const candidate of scan.candidates) {
+        const serialized = await this.#readCandidate(
+          candidate.path,
+          scan.temporaryPaths,
+        );
+        const parsed = this.#validateRecord(JSON.parse(serialized) as unknown);
+        if (parsed.id !== runId || parsed.version !== candidate.version) {
+          fail("RUN_STORE_READ_FAILED");
+        }
+        records.push(parsed);
+      }
+      return records;
     } catch {
       fail("RUN_STORE_READ_FAILED");
     }
   }
 
-  async #acquireLock(lockPath: string): Promise<string> {
-    const token = randomToken("RUN_STORE_LOCKED");
-    let createdAt: string;
+  async #readCandidate(
+    path: string,
+    temporaryPaths: string[],
+  ): Promise<string> {
+    let handle: FileHandle | undefined;
     try {
-      createdAt = this.#clock.now();
-    } catch {
-      fail("RUN_STORE_LOCKED");
-    }
-    if (parseTimestamp(createdAt) === null) {
-      fail("RUN_STORE_LOCKED");
-    }
-    const record: LockRecord = { version: LOCK_VERSION, createdAt, token };
+      const before = await lstat(path, { bigint: true });
+      if (!before.isFile() || before.isSymbolicLink()) {
+        fail("RUN_STORE_READ_FAILED");
+      }
+      handle = await open(path, constants.O_RDONLY | NO_FOLLOW);
+      const opened = await handle.stat({ bigint: true });
+      const afterOpen = await lstat(path, { bigint: true });
+      if (
+        !opened.isFile() ||
+        !afterOpen.isFile() ||
+        afterOpen.isSymbolicLink() ||
+        !sameIdentity(before, opened) ||
+        !sameIdentity(opened, afterOpen) ||
+        !(await this.#hasSafeLinkCount(opened, temporaryPaths))
+      ) {
+        fail("RUN_STORE_READ_FAILED");
+      }
+      if (opened.size > BigInt(MAX_RUN_FILE_BYTES)) {
+        fail("RUN_STORE_READ_FAILED");
+      }
 
-    try {
-      await writeExclusiveSynced(lockPath, JSON.stringify(record));
-      return token;
-    } catch (error: unknown) {
-      if (!isNodeError(error, "EEXIST")) {
-        preserveOrFail(error, "RUN_STORE_LOCKED");
+      const buffer = Buffer.alloc(MAX_RUN_FILE_BYTES + 1);
+      let offset = 0;
+      while (offset < buffer.length) {
+        const result = await handle.read(
+          buffer,
+          offset,
+          buffer.length - offset,
+          null,
+        );
+        if (result.bytesRead === 0) {
+          break;
+        }
+        offset += result.bytesRead;
+      }
+      if (offset > MAX_RUN_FILE_BYTES) {
+        fail("RUN_STORE_READ_FAILED");
+      }
+
+      const afterRead = await handle.stat({ bigint: true });
+      const afterPath = await lstat(path, { bigint: true });
+      if (
+        !unchangedFile(opened, afterRead) ||
+        !unchangedFile(afterRead, afterPath)
+      ) {
+        fail("RUN_STORE_READ_FAILED");
+      }
+      return buffer.subarray(0, offset).toString("utf8");
+    } catch {
+      fail("RUN_STORE_READ_FAILED");
+    } finally {
+      if (handle !== undefined) {
+        await handle.close().catch(() => undefined);
       }
     }
-
-    if (!(await this.#removeOneStaleLock(lockPath))) {
-      fail("RUN_STORE_LOCKED");
-    }
-
-    try {
-      await writeExclusiveSynced(lockPath, JSON.stringify(record));
-      return token;
-    } catch {
-      fail("RUN_STORE_LOCKED");
-    }
+    fail("RUN_STORE_READ_FAILED");
   }
 
-  async #removeOneStaleLock(lockPath: string): Promise<boolean> {
-    try {
-      const original = await readBounded(lockPath, MAX_LOCK_FILE_BYTES);
-      const record = parseLockRecord(JSON.parse(original) as unknown);
-      const now = parseTimestamp(this.#clock.now());
-      const createdAt =
-        record === null ? null : parseTimestamp(record.createdAt);
-      if (
-        record === null ||
-        now === null ||
-        createdAt === null ||
-        now - createdAt < STALE_LOCK_MILLISECONDS
-      ) {
-        return false;
-      }
-
-      const unchanged = await readBounded(lockPath, MAX_LOCK_FILE_BYTES);
-      if (unchanged !== original) {
-        return false;
-      }
-      await unlink(lockPath);
+  async #hasSafeLinkCount(
+    opened: BigIntStats,
+    temporaryPaths: string[],
+  ): Promise<boolean> {
+    if (opened.nlink === 1n) {
       return true;
-    } catch {
+    }
+    if (opened.nlink !== 2n) {
       return false;
     }
-  }
 
-  async #releaseLock(lockPath: string, token: string): Promise<void> {
-    try {
-      const serialized = await readBounded(lockPath, MAX_LOCK_FILE_BYTES);
-      const record = parseLockRecord(JSON.parse(serialized) as unknown);
-      if (record?.token === token) {
-        await unlink(lockPath);
+    let matchingTemporaryLinks = 0;
+    for (const temporaryPath of temporaryPaths) {
+      try {
+        const temporary = await lstat(temporaryPath, { bigint: true });
+        if (
+          temporary.isFile() &&
+          !temporary.isSymbolicLink() &&
+          sameIdentity(opened, temporary)
+        ) {
+          matchingTemporaryLinks += 1;
+        }
+      } catch {
+        return false;
       }
-    } catch {
-      // A missing or changed lock is never removed based on stale ownership.
     }
+    return matchingTemporaryLinks === 1;
   }
 }

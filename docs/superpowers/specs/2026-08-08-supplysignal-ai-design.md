@@ -150,6 +150,33 @@ The application has two explicit runtime modes:
 
 Runs are stored on the local filesystem under a validated root. Private runtime records and sanitized public replay data are separate representations. A committed replay fixture contains only reviewed, non-sensitive data.
 
+### Correction A9 (Approved 2026-08-08)
+
+Task 5 persistence uses immutable version files as its compare-and-swap
+authority. This correction supersedes only the earlier fixed run file and
+lock-file implementation detail; the `RunStore` interface and all other
+approved behavior remain unchanged.
+
+- An exact `<runId>.v<16-digit-version>.json` file is authoritative. Version
+  zero is create; compare-and-swap may publish only `expectedVersion + 1`.
+- Publication writes a unique same-directory file with exclusive creation,
+  writes and syncs it fully, closes it, then creates the final version with an
+  atomic create-only hard link. `EEXIST` is a bounded conflict. Published
+  versions are never replaced or mutated, and temporary files are cleaned on
+  every handled success or failure path.
+- Reads stream the directory and accept no more than 1,024 exact matching
+  version files. History must begin at zero, be strictly contiguous, and have
+  strictly valid records whose IDs and versions match their filenames. A gap,
+  malformed candidate, corruption, ambiguity, or excess candidate fails
+  closed.
+- Lock files and stale-lock recovery are removed from the correctness path.
+- The store establishes a canonical root and derives children only from it.
+  Each candidate is checked before open, opened without following links where
+  the platform supports it, checked through its handle, checked again by path,
+  and accepted only when identity, regular-file status, bounded size, and safe
+  link count remain valid. Symlink, reparse-point, path-swap, and outside-root
+  hard-link candidates fail closed.
+
 ## 5. Data flow
 
 The approved primary flow is:

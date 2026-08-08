@@ -780,6 +780,41 @@ git commit -m "feat: persist runs atomically"
 
 **Review gate:** Verify path confinement, crash safety, and concurrent start-claim behavior.
 
+#### Correction A9 (Approved 2026-08-08)
+
+This correction supersedes only Task 5's fixed run file, replacement, and
+lock-file implementation details. Keep the existing `RunStore` API and
+`FileRunStore({ root, clock })` constructor unchanged.
+
+1. Make exact immutable files named
+   `<runId>.v<16-digit-version>.json` authoritative. Create publishes version
+   zero; compare-and-swap publishes only `expectedVersion + 1`.
+2. Publish through a unique same-directory `wx` temporary file: complete the
+   write, sync, and close, then atomically create the final version with a hard
+   link. Treat `EEXIST` as conflict, clean the temporary on every handled path,
+   and never replace a published version.
+3. Stream candidate discovery without an unbounded directory listing. Accept
+   at most 1,024 exact version filenames; require a zero start, strict
+   contiguity, strict record validation, and matching record ID/version. Fail
+   closed on malformed candidates, gaps, corruption, ambiguity, or excess.
+4. Remove `.lock` from the correctness path and remove superseded stale-lock
+   behavior and tests. Normal operations must create no lock file.
+5. Canonicalize the root and derive children only from it. Harden each read
+   with pre-`lstat`, handle open using `O_NOFOLLOW` where supported, `fstat`,
+   post-`lstat`, stable device/inode identity, regular-file checks, safe link
+   count, and a bounded handle read. Reject symlinks, reparse points, path
+   swaps, and outside-root hard links.
+6. Add RED regressions for concurrent create/CAS, 200 iterations with zero dual
+   winners, crash before and after final link, gaps, corrupt JSON/schema,
+   ID/version mismatch, more than 1,024 versions, symlink and hard-link escape,
+   temporary cleanup, and absence of lock files. Preserve accessor and proxy
+   safety. A Windows symlink test may report `EPERM` truthfully; Linux CI must
+   exercise it.
+7. Run focused, coverage, affected, and full offline suites plus typecheck,
+   zero-warning lint, format, production build, diff checks, and repository
+   secret/build-clean gates when available. Record exact evidence and stop for
+   independent specification and quality reviews before Task 6.
+
 ---
 
 ### Task 6: Implement and contract-test the CALL-E REST boundary
