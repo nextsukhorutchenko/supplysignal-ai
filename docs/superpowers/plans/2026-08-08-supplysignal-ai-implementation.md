@@ -142,7 +142,9 @@ Use `packageManager: "pnpm@11.20.0"`, `engines.node: "22.23.1"`, and exact depen
 
 Run: `corepack prepare pnpm@11.20.0 --activate`
 
-Run: `pnpm install --save-exact`
+Run: `pnpm install`
+
+Correction A1 (approved 2026-08-08): pnpm `11.20.0` rejects `--save-exact` on `pnpm install`. Exact versions remain enforced by literal manifest versions and `.npmrc` `save-exact=true`.
 
 Expected: `pnpm-lock.yaml` is created and all manifest versions remain exact.
 
