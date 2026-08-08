@@ -1,2 +1,13 @@
 .superpowers/
 .worktrees/
+.env*
+!.env.example
+.next/
+*.tsbuildinfo
+node_modules/
+coverage/
+playwright-report/
+test-results/
+runs/
+tmp/
+preflight-private/
