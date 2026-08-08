@@ -6,6 +6,10 @@
 
 **Written specification approval date:** 2026-08-08
 
+**Correction A7.1:** Approved on 2026-08-08. Standard objects may retain
+`Object.prototype` at the input boundary, but inherited properties are never
+read or copied. Every custom prototype and every own accessor remains rejected.
+
 **Design approval date:** 2026-08-08
 
 **Authority:** This amendment supplements the approved SupplySignal AI design
@@ -65,8 +69,9 @@ The boundary accepts only JSON-compatible plain data:
 
 The boundary rejects, at any depth:
 
-- own or inherited getters and setters;
-- custom prototypes and class instances;
+- own getters and setters;
+- custom prototypes and class instances, including any behavior inherited from
+  those custom prototypes;
 - `Date`, `Map`, `Set`, and other non-plain objects;
 - symbols, functions, bigint, and `undefined`;
 - non-finite numbers;
@@ -77,6 +82,14 @@ The boundary rejects, at any depth:
 - reflection or descriptor inspection failures;
 - values that exceed a boundary budget; and
 - the keys `__proto__`, `prototype`, and `constructor`.
+
+Ordinary objects inherit standard non-enumerable properties, including the
+legacy `Object.prototype.__proto__` accessor. Those standard inherited
+properties are not input fields: canonicalization neither reads nor copies
+them, and the null-prototype canonical result prevents Zod from resolving them.
+This rule also prevents an enumerable property added to `Object.prototype`
+from reaching Zod. It does not make every ordinary object invalid merely for
+having `Object.prototype` as its direct prototype.
 
 Rejecting the three reserved keys prevents later merge, serialization, or
 artifact-writing code from accidentally reintroducing prototype-pollution
@@ -178,9 +191,11 @@ external effects.
 Implementation begins with failing regression tests against the current code.
 The final tests must prove all of the following:
 
-1. Root and nested inherited getters are rejected without invocation.
+1. Root and nested values with custom prototypes are rejected without invoking
+   getters inherited from those prototypes.
 2. Own getters and setters are rejected without invocation at every tested
-   depth.
+   depth, while properties inherited from `Object.prototype` are neither read
+   nor copied.
 3. Custom prototypes and class instances are rejected.
 4. Sparse arrays, symbol keys, unsupported primitive values, cycles, and
    reserved prototype-pollution keys are rejected.
@@ -216,6 +231,7 @@ Task 4 must not begin until Task 3A receives both `Spec PASS` and
 ## 11. Definition of done
 
 Amendment A7 is complete only when all listed schemas route untrusted
-object/array input through the shared boundary, no tested own or inherited
-accessor executes, existing domain behavior remains unchanged, required checks
-pass, and the independent review gate approves the complete Task 3 range.
+object/array input through the shared boundary, no tested own or custom-
+prototype accessor executes, no `Object.prototype` property reaches Zod,
+existing domain behavior remains unchanged, required checks pass, and the
+independent review gate approves the complete Task 3 range.
