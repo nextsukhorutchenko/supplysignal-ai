@@ -29,6 +29,7 @@ const filesystemInterception = vi.hoisted(() => ({
   afterPublicationHandleClose: undefined as
     ((temporaryPath: string) => Promise<void>) | undefined,
   beforeUnlink: undefined as ((path: string) => Promise<void>) | undefined,
+  afterUnlink: undefined as ((path: string) => Promise<void>) | undefined,
 }));
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -108,7 +109,14 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       ) {
         await filesystemInterception.beforeUnlink(path);
       }
-      return actual.unlink(...args);
+      const result = await actual.unlink(...args);
+      if (
+        typeof path === "string" &&
+        filesystemInterception.afterUnlink !== undefined
+      ) {
+        await filesystemInterception.afterUnlink(path);
+      }
+      return result;
     },
   };
 });
@@ -199,6 +207,7 @@ afterEach(async () => {
   filesystemInterception.afterPublicationLink = undefined;
   filesystemInterception.afterPublicationHandleClose = undefined;
   filesystemInterception.beforeUnlink = undefined;
+  filesystemInterception.afterUnlink = undefined;
   await Promise.all(
     cleanupPaths
       .splice(0)
@@ -930,6 +939,72 @@ describe("FileRunStore", () => {
       "RUN_STORE_READ_FAILED",
       root,
     );
+  });
+
+  it("preserves replacement temp when root changes after final rollback", async () => {
+    const root = await createRoot();
+    const displacedRoot = `${root}-displaced`;
+    cleanupPaths.push(displacedRoot);
+    const store = new FileRunStore({ root, clock });
+    const finalPath = join(root, VERSION_ZERO);
+    const replacementTemporary = "unrelated replacement temporary";
+    let temporaryName: string | undefined;
+    let temporaryUnlinkAttempts = 0;
+    filesystemInterception.beforePublicationLink = async (temporaryPath) => {
+      temporaryName = temporaryPath.slice(root.length + 1);
+    };
+    filesystemInterception.beforeUnlink = async (path) => {
+      if (
+        temporaryName !== undefined &&
+        path === join(root, temporaryName) &&
+        temporaryUnlinkAttempts === 0
+      ) {
+        temporaryUnlinkAttempts += 1;
+        throw Object.assign(new Error("forced temporary unlink failure"), {
+          code: "EACCES",
+        });
+      }
+    };
+    filesystemInterception.afterUnlink = async (path) => {
+      if (path === finalPath) {
+        await rename(root, displacedRoot);
+        await mkdir(root);
+        await writeFile(
+          join(root, temporaryName as string),
+          replacementTemporary,
+          "utf8",
+        );
+      }
+    };
+
+    const [outcome] = await Promise.allSettled([store.create(createRun())]);
+
+    expect(temporaryName).toContain("run-001.");
+    expect.soft(outcome).toMatchObject({
+      status: "rejected",
+      reason: expect.objectContaining({ message: "RUN_STORE_INVALID_ROOT" }),
+    });
+    expect.soft(await readdir(root)).toEqual([temporaryName]);
+    expect
+      .soft(
+        await readFile(join(root, temporaryName as string), "utf8").catch(
+          () => undefined,
+        ),
+      )
+      .toBe(replacementTemporary);
+    expect(await readdir(displacedRoot)).toEqual([temporaryName]);
+    expect(
+      (
+        await lstat(join(displacedRoot, temporaryName as string), {
+          bigint: true,
+        })
+      ).nlink,
+    ).toBe(1n);
+    if (outcome?.status === "rejected") {
+      const exposed = `${String(outcome.reason)} ${JSON.stringify(outcome.reason)}`;
+      expect(exposed).not.toContain(privatePhone);
+      expect(exposed).not.toContain(root);
+    }
   });
 
   it("preserves both links when temporary unlink and final rollback fail", async () => {

@@ -461,7 +461,18 @@ export class FileRunStore implements RunStore {
           operationError = error;
         }
         if (finalRollbackSucceeded) {
-          await unlinkBestEffort(temporaryPath);
+          let temporaryCleanupRootVerified = false;
+          try {
+            if ((await this.#verifyRoot("RUN_STORE_WRITE_FAILED")) !== root) {
+              fail("RUN_STORE_INVALID_ROOT");
+            }
+            temporaryCleanupRootVerified = true;
+          } catch (error: unknown) {
+            operationError = error;
+          }
+          if (temporaryCleanupRootVerified) {
+            await unlinkBestEffort(temporaryPath);
+          }
         }
       } else {
         await unlinkBestEffort(temporaryPath);
