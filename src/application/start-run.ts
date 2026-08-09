@@ -179,6 +179,7 @@ async function startRunInternal(
   runId: string,
 ): Promise<RunRecord> {
   let current = await readRun(dependencies.store, runId);
+  let ownsCreateAttempt = false;
   requireAuthorization(current);
 
   if (current.callId !== undefined) {
@@ -193,6 +194,10 @@ async function startRunInternal(
   }
   if (current.status === "AWAITING_APPROVAL") {
     current = await claimRun(dependencies, current);
+    ownsCreateAttempt = true;
+  }
+  if (!ownsCreateAttempt) {
+    throw bounded("CALL_OUTCOME_PENDING");
   }
 
   const input = createInput(current);

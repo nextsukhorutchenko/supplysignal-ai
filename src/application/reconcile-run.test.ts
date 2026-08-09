@@ -173,24 +173,42 @@ class TerminalRaceStore implements RunStore {
 }
 
 describe("reconcileRun", () => {
-  it("recovers a restart at CALL_STARTING with the persisted key and request", async () => {
+  it.each(["CALL_STARTING", "RECONCILING"] as const)(
+    "does not POST while reconciling a %s run without a call ID",
+    async (status) => {
+      // Catches recovery create from persisted state after the original
+      // claim-owning invocation is no longer available.
+      const original = activeRun({ status });
+      const store = new MemoryStore(original);
+      const calle = new FakeCalle();
+
+      await expect(
+        reconcileRun({ store, calle, clock }, original.id),
+      ).rejects.toMatchObject({
+        code: "CALL_OUTCOME_PENDING",
+        message: "CALL_OUTCOME_PENDING",
+      });
+
+      expect(calle.creates).toHaveLength(0);
+      expect(calle.gets).toHaveLength(0);
+      expect(store.current).toEqual(original);
+    },
+  );
+
+  it("leaves a restarted CALL_STARTING run pending without another POST", async () => {
     const original = activeRun({ status: "CALL_STARTING" });
     const store = new MemoryStore(original);
     const calle = new FakeCalle();
 
-    const result = await reconcileRun({ store, calle, clock }, original.id);
+    await expect(
+      reconcileRun({ store, calle, clock }, original.id),
+    ).rejects.toMatchObject({
+      code: "CALL_OUTCOME_PENDING",
+      message: "CALL_OUTCOME_PENDING",
+    });
 
-    expect(calle.creates).toHaveLength(1);
-    expect(calle.creates[0]).toMatchObject({
-      idempotencyKey: original.idempotencyKey,
-      runId: original.id,
-      order: original.order,
-      recipient: original.recipient,
-    });
-    expect(result).toMatchObject({
-      callId: "call_demo_001",
-      status: "CALL_STARTING",
-    });
+    expect(calle.creates).toHaveLength(0);
+    expect(store.current).toEqual(original);
   });
 
   it("never creates when a call identifier exists", async () => {
@@ -239,7 +257,7 @@ describe("reconcileRun", () => {
     expect(calle.creates).toHaveLength(0);
   });
 
-  it("keeps reconciliation pending after another ambiguous recovery create", async () => {
+  it("keeps reconciliation pending without attempting ambiguous recovery create", async () => {
     const store = new MemoryStore(activeRun());
     const calle = new FakeCalle();
     calle.createResult = new CalleError(
@@ -255,10 +273,10 @@ describe("reconcileRun", () => {
     });
     expect(store.current.status).toBe("RECONCILING");
     expect(store.current.idempotencyKey).toBe(activeRun().idempotencyKey);
-    expect(calle.creates).toHaveLength(1);
+    expect(calle.creates).toHaveLength(0);
   });
 
-  it("makes a definite recovery rejection terminal without another POST", async () => {
+  it("does not reach a configured definite create rejection during manual resolution", async () => {
     const store = new MemoryStore(activeRun());
     const calle = new FakeCalle();
     calle.createResult = new CalleError(
@@ -268,12 +286,13 @@ describe("reconcileRun", () => {
 
     await expect(
       reconcileRun({ store, calle, clock }, "run-001"),
-    ).rejects.toMatchObject({ code: "CALL_CREATION_FAILED" });
-    const second = await reconcileRun({ store, calle, clock }, "run-001");
+    ).rejects.toMatchObject({ code: "CALL_OUTCOME_PENDING" });
+    await expect(
+      reconcileRun({ store, calle, clock }, "run-001"),
+    ).rejects.toMatchObject({ code: "CALL_OUTCOME_PENDING" });
 
-    expect(store.current.status).toBe("FAILED");
-    expect(second.status).toBe("FAILED");
-    expect(calle.creates).toHaveLength(1);
+    expect(store.current.status).toBe("RECONCILING");
+    expect(calle.creates).toHaveLength(0);
   });
 
   it("bounds competing failed and completed terminal observations without a stale transition", async () => {

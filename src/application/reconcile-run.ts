@@ -1,7 +1,5 @@
 import { AppError } from "../domain/errors.js";
 import { isoTimestampSchema } from "../domain/authorization.js";
-import { callRecipientSchema } from "../domain/call-recipient.js";
-import { purchaseOrderSchema } from "../domain/purchase-order.js";
 import {
   providerEvidenceSnapshotSchema,
   runRecordSchema,
@@ -10,13 +8,7 @@ import {
   type RunRecord,
   type RunStatus,
 } from "../domain/run.js";
-import { deriveCallIdentity } from "./idempotency.js";
-import type {
-  CalleGateway,
-  Clock,
-  CreateSupplierCall,
-  RunStore,
-} from "./ports.js";
+import type { CalleGateway, Clock, RunStore } from "./ports.js";
 
 export type ReconcileRunDependencies = {
   store: RunStore;
@@ -62,34 +54,6 @@ async function readActiveRun(
     }
     throw bounded("CALL_OUTCOME_PENDING");
   }
-}
-
-function createInput(run: RunRecord): CreateSupplierCall {
-  if (
-    run.idempotencyKey === undefined ||
-    run.requestDigest === undefined ||
-    run.authorization === undefined
-  ) {
-    throw bounded("CALL_OUTCOME_PENDING");
-  }
-  let identity: ReturnType<typeof deriveCallIdentity>;
-  try {
-    identity = deriveCallIdentity(run);
-  } catch {
-    throw bounded("CALL_OUTCOME_PENDING");
-  }
-  if (
-    identity.idempotencyKey !== run.idempotencyKey ||
-    identity.requestDigest !== run.requestDigest
-  ) {
-    throw bounded("PROVIDER_RESULT_CONFLICT");
-  }
-  return {
-    runId: run.id,
-    idempotencyKey: run.idempotencyKey,
-    order: purchaseOrderSchema.parse(run.order),
-    recipient: callRecipientSchema.parse(run.recipient),
-  };
 }
 
 function sameSnapshot(
@@ -257,34 +221,18 @@ async function reconcileRunInternal(
     return current;
   }
 
+  if (current.callId === undefined) {
+    throw bounded("CALL_OUTCOME_PENDING");
+  }
+
   let snapshot: ProviderEvidenceSnapshot;
-  if (current.callId !== undefined) {
-    try {
-      snapshot = await dependencies.calle.getCall(current.callId);
-    } catch (error: unknown) {
-      if (
-        error instanceof AppError &&
-        error.code === "PROVIDER_RESULT_INVALID"
-      ) {
-        throw bounded("PROVIDER_RESULT_INVALID");
-      }
-      return persistPending(dependencies, current);
+  try {
+    snapshot = await dependencies.calle.getCall(current.callId);
+  } catch (error: unknown) {
+    if (error instanceof AppError && error.code === "PROVIDER_RESULT_INVALID") {
+      throw bounded("PROVIDER_RESULT_INVALID");
     }
-  } else {
-    const input = createInput(current);
-    try {
-      snapshot = await dependencies.calle.createCall(input);
-    } catch (error: unknown) {
-      if (error instanceof AppError && error.code === "CALL_CREATION_FAILED") {
-        await persistStatus(dependencies, current, "FAILED");
-        throw bounded("CALL_CREATION_FAILED");
-      }
-      if (error instanceof AppError && error.code === "CALL_OUTCOME_PENDING") {
-        return persistPending(dependencies, current);
-      }
-      await persistStatus(dependencies, current, "FAILED");
-      throw bounded("CALL_CREATION_FAILED");
-    }
+    return persistPending(dependencies, current);
   }
 
   return persistProviderSnapshot(dependencies, current, snapshot);

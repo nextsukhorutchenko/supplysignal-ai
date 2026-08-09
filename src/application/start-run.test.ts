@@ -4,6 +4,7 @@ import { CalleError } from "../adapters/calle/client.js";
 import { AppError } from "../domain/errors.js";
 import type { ProviderEvidenceSnapshot, RunRecord } from "../domain/run.js";
 import { deriveCallIdentity } from "./idempotency.js";
+import { reconcileRun } from "./reconcile-run.js";
 import { startRun } from "./start-run.js";
 import type {
   CalleCallSnapshot,
@@ -58,6 +59,11 @@ function authorizedRun(overrides: Partial<RunRecord> = {}): RunRecord {
     updatedAt: "2026-08-08T12:05:00.000Z",
     ...overrides,
   };
+}
+
+function claimedRun(status: "CALL_STARTING" | "RECONCILING"): RunRecord {
+  const run = authorizedRun({ version: 6, status });
+  return { ...run, ...deriveCallIdentity(run) };
 }
 
 function snapshot(
@@ -181,6 +187,25 @@ describe("startRun", () => {
     expect(calle.createInputs).toHaveLength(1);
   });
 
+  it.each(["CALL_STARTING", "RECONCILING"] as const)(
+    "does not treat a pre-existing %s run without a call ID as permission to create",
+    async (status) => {
+      // Catches resuming POST from durable active state instead of requiring this
+      // invocation to win the atomic AWAITING_APPROVAL claim.
+      const original = claimedRun(status);
+      const store = new MemoryStore(original);
+      const calle = new FakeCalle();
+
+      await expectCode(
+        startRun({ store, calle, clock }, original.id),
+        "CALL_OUTCOME_PENDING",
+      );
+
+      expect(calle.createInputs).toHaveLength(0);
+      expect(store.current).toEqual(original);
+    },
+  );
+
   it("lets only one simultaneous claimant reach provider create", async () => {
     const store = new MemoryStore(authorizedRun());
     const calle = new FakeCalle();
@@ -200,7 +225,70 @@ describe("startRun", () => {
     expect(store.current.callId).toBe("call_demo_001");
   });
 
-  it("reuses the original key and byte-equivalent request after an ambiguous create", async () => {
+  it("keeps one POST after an ambiguous first create across later start and reconcile", async () => {
+    // Catches automatic recovery POST after the original claim-owning invocation
+    // has already consumed the one permitted create attempt.
+    const store = new MemoryStore(authorizedRun());
+    const calle = new FakeCalle();
+    calle.createImplementation = async () => {
+      throw new CalleError("CALL_OUTCOME_PENDING", "ambiguous_create");
+    };
+
+    await expectCode(
+      startRun({ store, calle, clock }, "run-001"),
+      "CALL_OUTCOME_PENDING",
+    );
+    const identity = {
+      idempotencyKey: store.current.idempotencyKey,
+      requestDigest: store.current.requestDigest,
+    };
+
+    await expectCode(
+      startRun({ store, calle, clock }, "run-001"),
+      "CALL_OUTCOME_PENDING",
+    );
+    await expectCode(
+      reconcileRun({ store, calle, clock }, "run-001"),
+      "CALL_OUTCOME_PENDING",
+    );
+
+    expect(calle.createInputs).toHaveLength(1);
+    expect(store.current).toMatchObject({
+      status: "RECONCILING",
+      ...identity,
+    });
+  });
+
+  it("keeps one POST when definite-failure persistence fails before later invocations", async () => {
+    // Catches a durable CALL_STARTING record being mistaken for new create
+    // authority after the provider definitely rejected the original POST.
+    const store = new MemoryStore(authorizedRun());
+    const calle = new FakeCalle();
+    calle.createImplementation = async () => {
+      store.failNextSwap = true;
+      throw new CalleError("CALL_CREATION_FAILED", "creation_rejected");
+    };
+
+    await expectCode(
+      startRun({ store, calle, clock }, "run-001"),
+      "CALL_OUTCOME_PENDING",
+    );
+    expect(store.current.status).toBe("CALL_STARTING");
+
+    await expectCode(
+      startRun({ store, calle, clock }, "run-001"),
+      "CALL_OUTCOME_PENDING",
+    );
+    await expectCode(
+      reconcileRun({ store, calle, clock }, "run-001"),
+      "CALL_OUTCOME_PENDING",
+    );
+
+    expect(calle.createInputs).toHaveLength(1);
+    expect(store.current.status).toBe("CALL_STARTING");
+  });
+
+  it("retains the original key and request without resuming an ambiguous create", async () => {
     const store = new MemoryStore(authorizedRun());
     const calle = new FakeCalle();
     let attempt = 0;
@@ -222,15 +310,16 @@ describe("startRun", () => {
       digest: store.current.requestDigest,
     };
 
-    const result = await startRun({ store, calle, clock }, "run-001");
+    await expectCode(
+      startRun({ store, calle, clock }, "run-001"),
+      "CALL_OUTCOME_PENDING",
+    );
 
-    expect(result.callId).toBe("call_demo_001");
     expect(calle.createInputs.map((input) => input.idempotencyKey)).toEqual([
-      firstIdentity.key,
       firstIdentity.key,
     ]);
     expect(store.current.requestDigest).toBe(firstIdentity.digest);
-    expect(calle.createInputs[1]).toEqual(calle.createInputs[0]);
+    expect(store.current.status).toBe("RECONCILING");
   });
 
   it("makes a definite idempotency conflict terminal without a recovery POST", async () => {
@@ -259,7 +348,7 @@ describe("startRun", () => {
     });
   });
 
-  it("does not report success when call-ID persistence loses to a newer no-ID winner", async () => {
+  it("does not retry when call-ID persistence loses to a newer no-ID winner", async () => {
     const store = new MemoryStore(authorizedRun());
     const calle = new FakeCalle();
     calle.createImplementation = async () => {
@@ -280,12 +369,13 @@ describe("startRun", () => {
     const originalKey = store.current.idempotencyKey;
     expect(store.current).not.toHaveProperty("callId");
 
-    calle.createImplementation = async () => snapshot();
-    const recovered = await startRun({ store, calle, clock }, "run-001");
+    await expectCode(
+      startRun({ store, calle, clock }, "run-001"),
+      "CALL_OUTCOME_PENDING",
+    );
 
-    expect(recovered.callId).toBe("call_demo_001");
+    expect(store.current).not.toHaveProperty("callId");
     expect(calle.createInputs.map((input) => input.idempotencyKey)).toEqual([
-      originalKey,
       originalKey,
     ]);
   });
@@ -322,7 +412,7 @@ describe("startRun", () => {
     },
   );
 
-  it("bounds an invalid clock value after provider response and preserves same-key recovery", async () => {
+  it("bounds an invalid clock after provider response without resuming create", async () => {
     let now = fixedNow;
     const changingClock: Clock = {
       now: () => now,
@@ -344,20 +434,18 @@ describe("startRun", () => {
     expect(store.current).not.toHaveProperty("callId");
 
     now = fixedNow;
-    calle.createImplementation = async () => snapshot();
-    const recovered = await startRun(
-      { store, calle, clock: changingClock },
-      "run-001",
+    await expectCode(
+      startRun({ store, calle, clock: changingClock }, "run-001"),
+      "CALL_OUTCOME_PENDING",
     );
 
-    expect(recovered.callId).toBe("call_demo_001");
+    expect(store.current).not.toHaveProperty("callId");
     expect(calle.createInputs.map((input) => input.idempotencyKey)).toEqual([
-      originalKey,
       originalKey,
     ]);
   });
 
-  it("treats call-identity persistence failure as pending and recovers with the same request", async () => {
+  it("keeps call-identity persistence failure pending without resuming create", async () => {
     const store = new MemoryStore(authorizedRun());
     const calle = new FakeCalle();
     calle.createImplementation = async () => {
@@ -374,12 +462,13 @@ describe("startRun", () => {
     expect(store.current.status).toBe("CALL_STARTING");
     expect(store.current).not.toHaveProperty("callId");
 
-    calle.createImplementation = async () => snapshot();
-    const recovered = await startRun({ store, calle, clock }, "run-001");
+    await expectCode(
+      startRun({ store, calle, clock }, "run-001"),
+      "CALL_OUTCOME_PENDING",
+    );
 
-    expect(recovered.callId).toBe("call_demo_001");
+    expect(store.current).not.toHaveProperty("callId");
     expect(calle.createInputs.map((input) => input.idempotencyKey)).toEqual([
-      originalKey,
       originalKey,
     ]);
     expect(store.current.requestDigest).toBe(originalDigest);
