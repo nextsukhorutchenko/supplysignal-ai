@@ -265,29 +265,28 @@ describe("FileRunStore", () => {
     expect(await readdir(root)).toEqual([VERSION_ONE]);
   });
 
-  it("rejects temporary-path substitution after fsync", async () => {
+  it("removes an identical-byte substituted final after rejecting publication", async () => {
     const root = await createRoot();
     const store = new FileRunStore({ root, clock });
     let synchronizedTemporaryPath: string | undefined;
+    let replacementBytesMatch = false;
+    let replacementIdentityDiffers = false;
     filesystemInterception.beforePublicationLink = async (
       temporaryPath,
       finalPath,
     ) => {
       if (finalPath.endsWith(VERSION_ZERO)) {
         synchronizedTemporaryPath = temporaryPath;
+        const synchronizedStats = await lstat(temporaryPath, { bigint: true });
+        const synchronizedBytes = await readFile(temporaryPath);
         await rename(temporaryPath, `${temporaryPath}.displaced`);
-        await writeFile(
-          temporaryPath,
-          JSON.stringify(
-            createRun({
-              order: {
-                ...createRun().order,
-                supplierName: "Substituted supplier",
-              },
-            }),
-          ),
-          "utf8",
-        );
+        await writeFile(temporaryPath, synchronizedBytes);
+        const replacementStats = await lstat(temporaryPath, { bigint: true });
+        const replacementBytes = await readFile(temporaryPath);
+        replacementBytesMatch = synchronizedBytes.equals(replacementBytes);
+        replacementIdentityDiffers =
+          synchronizedStats.dev !== replacementStats.dev ||
+          synchronizedStats.ino !== replacementStats.ino;
       }
     };
 
@@ -297,6 +296,14 @@ describe("FileRunStore", () => {
       root,
     );
     expect(synchronizedTemporaryPath).toContain("run-001.");
+    expect(replacementBytesMatch).toBe(true);
+    expect(replacementIdentityDiffers).toBe(true);
+    await expectBoundedFailure(
+      store.read("run-001"),
+      "RUN_STORE_READ_FAILED",
+      root,
+    );
+    expect(await readdir(root)).not.toContain(VERSION_ZERO);
   });
 
   it("rejects schema-invalid and accessor-backed records before writing", async () => {

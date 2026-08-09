@@ -337,6 +337,7 @@ export class FileRunStore implements RunStore {
     );
 
     let handle: FileHandle | undefined;
+    let finalLinked = false;
     let operationError: unknown;
     try {
       const serialized = JSON.stringify(record);
@@ -362,6 +363,7 @@ export class FileRunStore implements RunStore {
       }
       try {
         await link(temporaryPath, finalPath);
+        finalLinked = true;
       } catch (error: unknown) {
         if (isNodeError(error, "EEXIST")) {
           fail(conflictCode);
@@ -401,6 +403,13 @@ export class FileRunStore implements RunStore {
         await handle.close();
       } catch (error: unknown) {
         operationError ??= error;
+      }
+    }
+    if (operationError !== undefined && finalLinked) {
+      try {
+        await unlink(finalPath);
+      } catch (error: unknown) {
+        operationError = error;
       }
     }
     await unlinkBestEffort(temporaryPath);
