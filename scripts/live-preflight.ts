@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { constants, type BigIntStats } from "node:fs";
 import { link, lstat, mkdir, open, realpath, unlink } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -10,11 +11,7 @@ import { CalleClient } from "../src/adapters/calle/client.js";
 import { FileRunStore } from "../src/adapters/filesystem/run-store.js";
 import { authorizeRun } from "../src/application/authorize-run.js";
 import { createRun } from "../src/application/create-run.js";
-import type {
-  CalleEventPage,
-  Clock,
-  IdGenerator,
-} from "../src/application/ports.js";
+import type { CalleEventPage, Clock } from "../src/application/ports.js";
 import { reconcileRun } from "../src/application/reconcile-run.js";
 import { startRun } from "../src/application/start-run.js";
 import { createCallRecipient } from "../src/domain/call-recipient.js";
@@ -35,6 +32,7 @@ const MAX_POLL_READS = 60;
 const MAX_EVENT_PAGES = 10;
 const MAX_PRIVATE_EVIDENCE_BYTES = 1_048_576;
 const SAFE_RUN_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
 
 const scenarioSchema = z.enum(["answered", "declined", "no_answer"]);
 
@@ -221,23 +219,47 @@ function requireContained(parent: string, child: string): void {
   }
 }
 
-async function attestExistingDirectory(path: string): Promise<string> {
+type DirectorySnapshot = {
+  configuredPath: string;
+  canonicalPath: string;
+  stats: BigIntStats;
+};
+
+function sameIdentity(first: BigIntStats, second: BigIntStats): boolean {
+  return first.dev === second.dev && first.ino === second.ino;
+}
+
+function sameStableMetadata(first: BigIntStats, second: BigIntStats): boolean {
+  return (
+    sameIdentity(first, second) &&
+    first.size === second.size &&
+    first.mtimeNs === second.mtimeNs &&
+    first.ctimeNs === second.ctimeNs
+  );
+}
+
+async function readDirectorySnapshot(path: string): Promise<DirectorySnapshot> {
   try {
     const configured = resolve(path);
-    const before = await lstat(configured);
+    const before = await lstat(configured, { bigint: true });
     if (!before.isDirectory() || before.isSymbolicLink()) {
       fail("CALL_OUTCOME_PENDING");
     }
     const canonical = await realpath(configured);
-    const after = await lstat(configured);
+    const after = await lstat(configured, { bigint: true });
     if (
       !after.isDirectory() ||
       after.isSymbolicLink() ||
+      !sameIdentity(before, after) ||
       normalizedPath(canonical) !== normalizedPath(configured)
     ) {
       fail("CALL_OUTCOME_PENDING");
     }
-    return canonical;
+    return {
+      configuredPath: configured,
+      canonicalPath: canonical,
+      stats: after,
+    };
   } catch (error: unknown) {
     if (error instanceof PreflightError) {
       throw error;
@@ -246,12 +268,27 @@ async function attestExistingDirectory(path: string): Promise<string> {
   }
 }
 
+async function verifyDirectory(
+  snapshot: DirectorySnapshot,
+): Promise<DirectorySnapshot> {
+  const current = await readDirectorySnapshot(snapshot.configuredPath);
+  if (
+    normalizedPath(current.canonicalPath) !==
+      normalizedPath(snapshot.canonicalPath) ||
+    !sameIdentity(current.stats, snapshot.stats)
+  ) {
+    fail("CALL_OUTCOME_PENDING");
+  }
+  return current;
+}
+
 async function establishChildDirectory(
-  parent: string,
+  parent: DirectorySnapshot,
   name: string,
-): Promise<string> {
-  const child = resolve(parent, name);
-  requireContained(parent, child);
+): Promise<DirectorySnapshot> {
+  await verifyDirectory(parent);
+  const child = resolve(parent.canonicalPath, name);
+  requireContained(parent.canonicalPath, child);
   try {
     await mkdir(child, { mode: 0o700 });
   } catch (error: unknown) {
@@ -259,29 +296,45 @@ async function establishChildDirectory(
       fail("CALL_OUTCOME_PENDING");
     }
   }
-  const canonical = await attestExistingDirectory(child);
-  requireContained(parent, canonical);
-  return canonical;
+  const snapshot = await readDirectorySnapshot(child);
+  requireContained(parent.canonicalPath, snapshot.canonicalPath);
+  await verifyDirectory(parent);
+  return snapshot;
 }
 
 type PrivateSession = {
-  root: string;
-  runs: string;
+  repository: DirectorySnapshot;
+  temporary: DirectorySnapshot;
+  privateRoot: DirectorySnapshot;
+  session: DirectorySnapshot;
+  runs: DirectorySnapshot;
 };
 
 async function establishPrivateSession(runId: string): Promise<PrivateSession> {
   if (!SAFE_RUN_ID.test(runId)) {
     fail("CALL_OUTCOME_PENDING");
   }
-  const repository = await attestExistingDirectory(REPOSITORY_ROOT);
+  const repository = await readDirectorySnapshot(REPOSITORY_ROOT);
   const temporary = await establishChildDirectory(repository, "tmp");
-  const privateDirectory = await establishChildDirectory(
+  const privateRoot = await establishChildDirectory(
     temporary,
     "preflight-private",
   );
-  const session = await establishChildDirectory(privateDirectory, runId);
+  const session = await establishChildDirectory(privateRoot, runId);
   const runs = await establishChildDirectory(session, "runs");
-  return { root: session, runs };
+  return { repository, temporary, privateRoot, session, runs };
+}
+
+async function verifyPrivateSession(session: PrivateSession): Promise<void> {
+  const repository = await verifyDirectory(session.repository);
+  const temporary = await verifyDirectory(session.temporary);
+  const privateRoot = await verifyDirectory(session.privateRoot);
+  const runSession = await verifyDirectory(session.session);
+  const runs = await verifyDirectory(session.runs);
+  requireContained(repository.canonicalPath, temporary.canonicalPath);
+  requireContained(temporary.canonicalPath, privateRoot.canonicalPath);
+  requireContained(privateRoot.canonicalPath, runSession.canonicalPath);
+  requireContained(runSession.canonicalPath, runs.canonicalPath);
 }
 
 async function collectEvents(
@@ -301,34 +354,26 @@ async function collectEvents(
   fail("CALL_OUTCOME_PENDING");
 }
 
-export type LivePreflightRuntimeOptions = {
-  fetchImpl: typeof fetch;
-  clock: Clock;
-  ids?: IdGenerator;
-};
-
-export async function executeLivePreflight(
-  input: PreflightExecutionInput,
-  options: LivePreflightRuntimeOptions,
-): Promise<PreflightExecutionResult> {
-  const runId =
-    options.ids?.next() ??
-    `preflight-${input.scenario}-${randomUUID().replaceAll("-", "")}`;
+async function executeLivePreflight(input: PreflightExecutionInput): Promise<{
+  result: PreflightExecutionResult;
+  privateSession: PrivateSession;
+}> {
+  const runId = `preflight-${input.scenario}-${randomUUID().replaceAll("-", "")}`;
   const privateSession = await establishPrivateSession(runId);
   const store = new FileRunStore({
-    root: privateSession.runs,
-    clock: options.clock,
+    root: privateSession.runs.canonicalPath,
+    clock: systemClock,
   });
   const calle = new CalleClient({
     apiKey: input.apiKey,
     baseUrl: CALLE_BASE_URL,
-    fetch: options.fetchImpl,
-    sleep: (milliseconds) => options.clock.sleep(milliseconds),
+    fetch,
+    sleep: (milliseconds) => systemClock.sleep(milliseconds),
   });
   const draft = await createRun(
     {
       store,
-      clock: options.clock,
+      clock: systemClock,
       ids: { next: () => runId },
     },
     {
@@ -348,7 +393,7 @@ export async function executeLivePreflight(
   );
   const awaiting = runRecordSchema.parse({
     ...transitionRun(draft, "AWAITING_APPROVAL"),
-    updatedAt: options.clock.now(),
+    updatedAt: systemClock.now(),
   });
   const reviewed = await store.compareAndSwap(
     draft.id,
@@ -356,7 +401,7 @@ export async function executeLivePreflight(
     awaiting,
   );
   const authorized = await authorizeRun(
-    { store, clock: options.clock },
+    { store, clock: systemClock },
     {
       runId,
       expectedVersion: reviewed.version,
@@ -375,8 +420,9 @@ export async function executeLivePreflight(
   void authorized;
 
   let current: RunRecord;
+  await verifyPrivateSession(privateSession);
   try {
-    current = await startRun({ store, calle, clock: options.clock }, runId);
+    current = await startRun({ store, calle, clock: systemClock }, runId);
   } catch (error: unknown) {
     if (!(error instanceof AppError) || error.code !== "CALL_OUTCOME_PENDING") {
       throw error;
@@ -394,12 +440,9 @@ export async function executeLivePreflight(
     ) {
       break;
     }
-    await options.clock.sleep(POLL_DELAY_MILLISECONDS);
+    await systemClock.sleep(POLL_DELAY_MILLISECONDS);
     try {
-      current = await reconcileRun(
-        { store, calle, clock: options.clock },
-        runId,
-      );
+      current = await reconcileRun({ store, calle, clock: systemClock }, runId);
     } catch (error: unknown) {
       if (
         !(error instanceof AppError) ||
@@ -420,11 +463,12 @@ export async function executeLivePreflight(
     fail("CALL_OUTCOME_PENDING");
   }
   const events = await collectEvents(calle, current.callId);
-  return { run: current, events };
+  return { result: { run: current, events }, privateSession };
 }
 
-export async function writePrivateEvidence(
+async function writePrivateEvidence(
   result: PreflightExecutionResult,
+  session: PrivateSession,
 ): Promise<void> {
   let serialized: string;
   try {
@@ -436,50 +480,187 @@ export async function writePrivateEvidence(
     fail("CALL_OUTCOME_PENDING");
   }
 
-  const session = await establishPrivateSession(result.run.id);
-  const finalPath = resolve(session.root, "result.json");
+  const serializedBytes = Buffer.from(serialized, "utf8");
+  const sessionRoot = session.session.canonicalPath;
+  const finalPath = resolve(sessionRoot, "result.json");
   const temporaryPath = resolve(
-    session.root,
+    sessionRoot,
     `.result-${randomUUID().replaceAll("-", "")}.tmp`,
   );
-  requireContained(session.root, finalPath);
-  requireContained(session.root, temporaryPath);
+  requireContained(sessionRoot, finalPath);
+  requireContained(sessionRoot, temporaryPath);
 
   let handle: Awaited<ReturnType<typeof open>> | undefined;
+  let opened: BigIntStats | undefined;
+  let finalLinked = false;
+  let commitUnlinkAttempted = false;
+  let operationError: unknown;
   try {
-    handle = await open(temporaryPath, "wx", 0o600);
+    await verifyPrivateSession(session);
+    handle = await open(
+      temporaryPath,
+      constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | NO_FOLLOW,
+      0o600,
+    );
+    await verifyPrivateSession(session);
     await handle.writeFile(serialized, "utf8");
     await handle.sync();
-    await handle.close();
-    handle = undefined;
+
+    const attestedBytes = Buffer.alloc(serializedBytes.length + 1);
+    let attestedLength = 0;
+    while (attestedLength < attestedBytes.length) {
+      const read = await handle.read(
+        attestedBytes,
+        attestedLength,
+        attestedBytes.length - attestedLength,
+        attestedLength,
+      );
+      if (read.bytesRead === 0) {
+        break;
+      }
+      attestedLength += read.bytesRead;
+    }
+    if (
+      attestedLength !== serializedBytes.length ||
+      !attestedBytes.subarray(0, attestedLength).equals(serializedBytes)
+    ) {
+      fail("CALL_OUTCOME_PENDING");
+    }
+
+    opened = await handle.stat({ bigint: true });
+    const temporaryBeforeLink = await lstat(temporaryPath, { bigint: true });
+    if (
+      !opened.isFile() ||
+      !temporaryBeforeLink.isFile() ||
+      temporaryBeforeLink.isSymbolicLink() ||
+      opened.nlink !== 1n ||
+      temporaryBeforeLink.nlink !== 1n ||
+      opened.size !== BigInt(serializedBytes.length) ||
+      !sameStableMetadata(opened, temporaryBeforeLink)
+    ) {
+      fail("CALL_OUTCOME_PENDING");
+    }
+
+    await verifyPrivateSession(session);
     await link(temporaryPath, finalPath);
-    await unlink(temporaryPath).catch(() => undefined);
-  } catch {
-    await handle?.close().catch(() => undefined);
-    await unlink(temporaryPath).catch(() => undefined);
+    finalLinked = true;
+    await verifyPrivateSession(session);
+
+    const afterLink = await handle.stat({ bigint: true });
+    const temporaryAfterLink = await lstat(temporaryPath, { bigint: true });
+    const finalAfterLink = await lstat(finalPath, { bigint: true });
+    if (
+      !afterLink.isFile() ||
+      !temporaryAfterLink.isFile() ||
+      temporaryAfterLink.isSymbolicLink() ||
+      !finalAfterLink.isFile() ||
+      finalAfterLink.isSymbolicLink() ||
+      afterLink.nlink !== 2n ||
+      temporaryAfterLink.nlink !== 2n ||
+      finalAfterLink.nlink !== 2n ||
+      !sameIdentity(opened, afterLink) ||
+      !sameStableMetadata(afterLink, temporaryAfterLink) ||
+      !sameStableMetadata(afterLink, finalAfterLink)
+    ) {
+      fail("CALL_OUTCOME_PENDING");
+    }
+  } catch (error: unknown) {
+    operationError = error;
+  }
+
+  if (handle !== undefined) {
+    try {
+      await handle.close();
+    } catch (error: unknown) {
+      operationError ??= error;
+    }
+  }
+
+  if (operationError === undefined) {
+    try {
+      await verifyPrivateSession(session);
+      commitUnlinkAttempted = true;
+      await unlink(temporaryPath);
+      await verifyPrivateSession(session);
+      const committed = await lstat(finalPath, { bigint: true });
+      if (
+        opened === undefined ||
+        !committed.isFile() ||
+        committed.isSymbolicLink() ||
+        committed.nlink !== 1n ||
+        !sameIdentity(opened, committed)
+      ) {
+        fail("CALL_OUTCOME_PENDING");
+      }
+      return;
+    } catch (error: unknown) {
+      operationError = error;
+    }
+  }
+
+  if (commitUnlinkAttempted) {
     fail("CALL_OUTCOME_PENDING");
   }
+
+  let safeToClean = false;
+  try {
+    await verifyPrivateSession(session);
+    safeToClean = true;
+  } catch (error: unknown) {
+    operationError = error;
+  }
+
+  if (safeToClean && finalLinked) {
+    try {
+      await unlink(finalPath);
+      finalLinked = false;
+      await verifyPrivateSession(session);
+    } catch (error: unknown) {
+      operationError = error;
+      safeToClean = false;
+    }
+  }
+  if (safeToClean && !finalLinked) {
+    try {
+      await unlink(temporaryPath);
+    } catch (error: unknown) {
+      if (!isNodeError(error, "ENOENT")) {
+        operationError = error;
+      }
+    }
+  }
+  void operationError;
+  fail("CALL_OUTCOME_PENDING");
 }
 
-export type CliPreflightProcessInput = Pick<
-  PreflightProcessInput,
-  "argv" | "env" | "isInteractive" | "prompt" | "writeOutput"
->;
-
-export function createCliPreflightProcess(
-  options: LivePreflightRuntimeOptions = {
-    fetchImpl: fetch,
-    clock: systemClock,
-  },
-) {
+function createLiveCliPreflightProcess() {
   const run = createPreflightProcess();
-  return async (input: CliPreflightProcessInput): Promise<PreflightSummary> =>
+  let privateSession: PrivateSession | undefined;
+  return async (): Promise<PreflightSummary> =>
     run({
-      ...input,
-      execute: (executionInput) =>
-        executeLivePreflight(executionInput, options),
-      writePrivateEvidence,
+      argv: process.argv.slice(2),
+      env: process.env,
+      isInteractive:
+        process.stdin.isTTY === true && process.stdout.isTTY === true,
+      prompt: promptOperator,
+      writeOutput: (message) => process.stdout.write(`${message}\n`),
+      execute: async (executionInput) => {
+        const execution = await executeLivePreflight(executionInput);
+        privateSession = execution.privateSession;
+        return execution.result;
+      },
+      writePrivateEvidence: async (result) => {
+        if (privateSession === undefined) {
+          fail("CALL_OUTCOME_PENDING");
+        }
+        await writePrivateEvidence(result, privateSession);
+      },
     });
+}
+
+export async function runCliPreflight(): Promise<void> {
+  const run = createLiveCliPreflightProcess();
+  await run();
 }
 
 async function promptOperator(question: string): Promise<string> {
@@ -494,24 +675,12 @@ async function promptOperator(question: string): Promise<string> {
   }
 }
 
-async function main(): Promise<void> {
-  const run = createCliPreflightProcess();
-  await run({
-    argv: process.argv.slice(2),
-    env: process.env,
-    isInteractive:
-      process.stdin.isTTY === true && process.stdout.isTTY === true,
-    prompt: promptOperator,
-    writeOutput: (message) => process.stdout.write(`${message}\n`),
-  });
-}
-
 const invokedPath = process.argv[1];
 if (
   invokedPath !== undefined &&
   import.meta.url === pathToFileURL(resolve(invokedPath)).href
 ) {
-  main().catch((error: unknown) => {
+  runCliPreflight().catch((error: unknown) => {
     const code =
       error instanceof PreflightError ? error.code : "CALL_OUTCOME_PENDING";
     process.stderr.write(`${code}\n`);

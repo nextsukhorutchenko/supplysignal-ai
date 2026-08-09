@@ -6,9 +6,10 @@ or from CI. The public replay cannot place calls.
 
 ## Safety boundary
 
-Every process permits at most one call creation attempt. One atomic permit is
-shared across all harness entry points and is reserved before any interactive
-wait. The harness:
+Every process permits at most one call creation attempt. The only live entry
+point is the attended CLI command documented below. It has no injectable
+provider, prompt, terminal, or HTTP options. One atomic permit is reserved
+before any interactive wait. The harness:
 
 - accepts exactly one scenario: `answered`, `declined`, or `no_answer`;
 - reads the recipient only from the server-side `SUPPLIER_TEST_PHONE`
@@ -152,13 +153,24 @@ tmp/preflight-private/<run-id>/
 ```
 
 The root is derived from the script location, not the terminal's current
-directory. The harness rejects redirected, symbolic-link, junction, or reparse
-components before provider execution. The final private result is bounded,
-create-only, and atomically linked from a synchronized temporary file. That
-directory is Git-ignored. Do not move its contents into `docs/`, `examples/`,
-screenshots, the public replay, or the demo video. The later public preflight
-report may contain only an allowlisted projection: scenario, date, application
-commit, OpenAPI version, call-ID hash, sanitized timestamps,
+directory. The harness pins the canonical repository, private-root, session,
+and run-store directory identities and re-attests them around private file
+publication. Redirected, symbolic-link, junction, reparse, or replaced path
+components fail bounded. The temporary and final names must resolve to the
+same synchronized regular file before temporary-link removal commits the
+result. The final private result is bounded and create-only.
+
+This protection assumes the repository and ignored private root are controlled
+by this local application account. It detects identity changes observable
+through Node's filesystem APIs; it does not claim protection from an arbitrary
+hostile process with equivalent account and filesystem privileges. Keep the
+repository private during the preflight and do not grant another process write
+access to these directories.
+
+The directory is Git-ignored. Do not move its contents into `docs/`,
+`examples/`, screenshots, the public replay, or the demo video. The later
+public preflight report may contain only an allowlisted projection: scenario,
+date, application commit, OpenAPI version, call-ID hash, sanitized timestamps,
 observed-versus-reported comparison, Dashboard visibility as informational
 context, and the final pass/fail decision.
 
@@ -176,6 +188,13 @@ context, and the final pass/fail decision.
   reconcile or escalate the existing call. This includes bounded polling that
   ended while the call was still active and event pagination that remained
   incomplete after its safety limit; neither case prints a successful result.
+- If `CALL_OUTCOME_PENDING` leaves both `result.json` and a
+  `.result-*.tmp` file, treat both links as incomplete private state. Do not
+  delete only the temporary name: that could make an uncommitted result appear
+  complete. After the process is stopped and the owner confirms the evidence
+  may be discarded, verify the exact repository-anchored run directory and
+  remove that whole run directory manually. Never use cleanup as authorization
+  to rerun the call.
 - Ringing without usable audio, a physical/provider outcome conflict, invented
   transcript or supplier facts, or a delayed duplicate call: stop expansion.
   Preserve private evidence and request an owner-approved design amendment

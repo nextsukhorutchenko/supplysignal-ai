@@ -1,12 +1,18 @@
-import { mkdir, readFile, readdir, rm, symlink } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  symlink,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdtemp } from "node:fs/promises";
 
 import { describe, expect, it, vi } from "vitest";
 
-import type { Clock } from "../src/application/ports.js";
 import type { RunRecord } from "../src/domain/run.js";
 import type {
   PreflightExecutionInput,
@@ -73,11 +79,6 @@ function validInput(
   };
 }
 
-const immediateClock: Clock = {
-  now: () => "2026-08-09T10:00:00.000Z",
-  sleep: async () => undefined,
-};
-
 async function fixture(name: string): Promise<string> {
   return readFile(
     new URL(`../tests/fixtures/calle/${name}`, import.meta.url),
@@ -96,22 +97,149 @@ async function removeSession(runId: string): Promise<void> {
   await rm(resolve(privateRoot, runId), { recursive: true, force: true });
 }
 
-function cliInput(
-  overrides: Partial<
-    Pick<
-      PreflightProcessInput,
-      "argv" | "env" | "isInteractive" | "prompt" | "writeOutput"
-    >
-  > = {},
-) {
-  return {
-    argv: ["--scenario", "answered"],
-    env: { CALLE_API_KEY: apiKey, SUPPLIER_TEST_PHONE: phone },
-    isInteractive: true,
-    prompt: vi.fn(async () => "AUTHORIZE ONE CALL"),
-    writeOutput: vi.fn<(message: string) => void>(),
-    ...overrides,
-  };
+const runUuid = "11111111-1111-4111-8111-111111111111";
+const temporaryUuid = "22222222-2222-4222-8222-222222222222";
+const guardedRunId = `preflight-answered-${runUuid.replaceAll("-", "")}`;
+
+type GuardedCliOptions = {
+  apiKey?: string;
+  phone?: string;
+  phrase?: string;
+  interactive?: boolean;
+  fetchMock?: typeof fetch;
+  mockFileSystem?: (
+    actual: typeof import("node:fs/promises"),
+  ) => Partial<typeof import("node:fs/promises")>;
+};
+
+type GuardedCliResult = {
+  error: unknown;
+  output: string;
+  fetchMock: ReturnType<typeof vi.fn<typeof fetch>>;
+};
+
+async function runGuardedCli(
+  options: GuardedCliOptions = {},
+): Promise<GuardedCliResult> {
+  vi.resetModules();
+  vi.doUnmock("node:crypto");
+  vi.doUnmock("node:fs/promises");
+  vi.doUnmock("node:readline/promises");
+  vi.doMock("node:crypto", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("node:crypto")>();
+    const uuids = [runUuid, temporaryUuid];
+    return {
+      ...actual,
+      randomUUID: vi.fn(() => uuids.shift() ?? temporaryUuid),
+    };
+  });
+  vi.doMock("node:readline/promises", () => ({
+    createInterface: () => ({
+      question: vi.fn(async () => options.phrase ?? "AUTHORIZE ONE CALL"),
+      close: vi.fn(),
+    }),
+  }));
+  if (options.mockFileSystem !== undefined) {
+    vi.doMock("node:fs/promises", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("node:fs/promises")>();
+      return { ...actual, ...options.mockFileSystem?.(actual) };
+    });
+  }
+
+  const fetchMock = vi.fn<typeof fetch>(
+    options.fetchMock ??
+      (async (url, init) => {
+        if (init?.method === "POST") {
+          return jsonResponse(await fixture("create-accepted.json"), 201);
+        }
+        if (String(url).endsWith("/events")) {
+          return jsonResponse(await fixture("events-page.json"));
+        }
+        return jsonResponse(await fixture("completed-valid.json"));
+      }),
+  );
+  const originalArgv = process.argv;
+  const originalApiKey = process.env.CALLE_API_KEY;
+  const originalPhone = process.env.SUPPLIER_TEST_PHONE;
+  const stdinTty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+  const stdoutTty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+  const output: string[] = [];
+  const outputSpy = vi.spyOn(process.stdout, "write").mockImplementation(((
+    chunk: string | Uint8Array,
+  ) => {
+    output.push(String(chunk));
+    return true;
+  }) as typeof process.stdout.write);
+  const timeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+    callback: (...arguments_: unknown[]) => void,
+  ) => {
+    queueMicrotask(callback);
+    return 0 as unknown as NodeJS.Timeout;
+  }) as typeof setTimeout);
+
+  process.argv = [
+    process.execPath,
+    "guarded-cli-test",
+    "--scenario",
+    "answered",
+  ];
+  if (options.apiKey === undefined) {
+    delete process.env.CALLE_API_KEY;
+  } else {
+    process.env.CALLE_API_KEY = options.apiKey;
+  }
+  if (options.phone === undefined) {
+    delete process.env.SUPPLIER_TEST_PHONE;
+  } else {
+    process.env.SUPPLIER_TEST_PHONE = options.phone;
+  }
+  Object.defineProperty(process.stdin, "isTTY", {
+    configurable: true,
+    value: options.interactive ?? true,
+  });
+  Object.defineProperty(process.stdout, "isTTY", {
+    configurable: true,
+    value: options.interactive ?? true,
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  let error: unknown;
+  try {
+    const preflightModule = await import("./live-preflight.js");
+    await preflightModule.runCliPreflight();
+  } catch (caught: unknown) {
+    error = caught;
+  } finally {
+    process.argv = originalArgv;
+    if (originalApiKey === undefined) {
+      delete process.env.CALLE_API_KEY;
+    } else {
+      process.env.CALLE_API_KEY = originalApiKey;
+    }
+    if (originalPhone === undefined) {
+      delete process.env.SUPPLIER_TEST_PHONE;
+    } else {
+      process.env.SUPPLIER_TEST_PHONE = originalPhone;
+    }
+    if (stdinTty === undefined) {
+      delete (process.stdin as { isTTY?: boolean }).isTTY;
+    } else {
+      Object.defineProperty(process.stdin, "isTTY", stdinTty);
+    }
+    if (stdoutTty === undefined) {
+      delete (process.stdout as { isTTY?: boolean }).isTTY;
+    } else {
+      Object.defineProperty(process.stdout, "isTTY", stdoutTty);
+    }
+    outputSpy.mockRestore();
+    timeoutSpy.mockRestore();
+    vi.unstubAllGlobals();
+    vi.doUnmock("node:crypto");
+    vi.doUnmock("node:fs/promises");
+    vi.doUnmock("node:readline/promises");
+    vi.resetModules();
+  }
+  return { error, output: output.join(""), fetchMock };
 }
 
 describe("live CALL-E preflight safety boundary", () => {
@@ -290,157 +418,158 @@ describe("live CALL-E preflight safety boundary", () => {
 });
 
 describe("actual offline CLI composition", () => {
-  it("fails missing configuration with zero provider POSTs and no evidence", async () => {
-    const { createCliPreflightProcess } = await freshModule();
-    const fetchMock = vi.fn<typeof fetch>();
-    const runId = "preflight-missing-config";
-    await removeSession(runId);
-    const run = createCliPreflightProcess({
-      fetchImpl: fetchMock,
-      clock: immediateClock,
-      ids: { next: () => runId },
-    });
+  it("does not export unguarded live execution, writer, or configurable composition", async () => {
+    const preflightModule = (await freshModule()) as Record<string, unknown>;
 
-    await expect(
-      run(cliInput({ env: { SUPPLIER_TEST_PHONE: phone } })),
-    ).rejects.toMatchObject({ code: "PREFLIGHT_CONFIGURATION_REQUIRED" });
-    expect(fetchMock).not.toHaveBeenCalled();
-    await expect(readdir(resolve(privateRoot, runId))).rejects.toThrow();
+    expect(preflightModule).toHaveProperty("runCliPreflight");
+    expect(preflightModule.runCliPreflight).toBeTypeOf("function");
+    expect(
+      (preflightModule.runCliPreflight as (...arguments_: never[]) => unknown)
+        .length,
+    ).toBe(0);
+    expect(preflightModule).not.toHaveProperty("executeLivePreflight");
+    expect(preflightModule).not.toHaveProperty("createCliPreflightProcess");
+    expect(preflightModule).not.toHaveProperty("writePrivateEvidence");
   });
 
-  it("uses the corrected lifecycle and actual writer from an alternate CWD with one POST", async () => {
-    const { createCliPreflightProcess } = await freshModule();
-    const runId = "preflight-actual-composition";
-    await removeSession(runId);
-    const fetchMock = vi.fn<typeof fetch>(async (url, init) => {
-      if (init?.method === "POST") {
-        return jsonResponse(await fixture("create-accepted.json"), 201);
-      }
-      if (String(url).endsWith("/events")) {
-        return jsonResponse(await fixture("events-page.json"));
-      }
-      return jsonResponse(await fixture("completed-valid.json"));
+  it("fails real CLI configuration with zero provider POSTs and no evidence", async () => {
+    await removeSession(guardedRunId);
+    const result = await runGuardedCli({ phone });
+
+    expect(result.error).toMatchObject({
+      code: "PREFLIGHT_CONFIGURATION_REQUIRED",
     });
-    const run = createCliPreflightProcess({
-      fetchImpl: fetchMock,
-      clock: immediateClock,
-      ids: { next: () => runId },
-    });
+    expect(result.fetchMock).not.toHaveBeenCalled();
+    await expect(readdir(resolve(privateRoot, guardedRunId))).rejects.toThrow();
+  });
+
+  it.each([
+    {
+      interactive: false,
+      phrase: "AUTHORIZE ONE CALL",
+      code: "PREFLIGHT_INTERACTIVE_REQUIRED",
+    },
+    {
+      interactive: true,
+      phrase: "authorize one call",
+      code: "AUTHORIZATION_REQUIRED",
+    },
+  ])(
+    "enforces the real CLI $code guard before provider execution",
+    async (guard) => {
+      await removeSession(guardedRunId);
+      const result = await runGuardedCli({
+        apiKey,
+        phone,
+        interactive: guard.interactive,
+        phrase: guard.phrase,
+      });
+
+      expect(result.error).toMatchObject({ code: guard.code });
+      expect(result.fetchMock).not.toHaveBeenCalled();
+      await expect(
+        readdir(resolve(privateRoot, guardedRunId)),
+      ).rejects.toThrow();
+    },
+  );
+
+  it("uses guarded private composition from an alternate CWD with exactly one POST", async () => {
+    await removeSession(guardedRunId);
     const outside = await mkdtemp(resolve(tmpdir(), "supplysignal-preflight-"));
     const originalCwd = process.cwd();
 
     try {
       process.chdir(outside);
-      const writeOutput = vi.fn<(message: string) => void>();
-      const input = cliInput({ writeOutput });
-      await expect(run(input)).resolves.toMatchObject({
-        status: "PROVIDER_REPORTED_TERMINAL",
-        providerStatus: "completed",
-      });
-      const posts = fetchMock.mock.calls.filter(
-        ([, request]) => request?.method === "POST",
-      );
-      expect(posts).toHaveLength(1);
+      const result = await runGuardedCli({ apiKey, phone });
+
+      expect(result.error).toBeUndefined();
+      expect(
+        result.fetchMock.mock.calls.filter(
+          ([, request]) => request?.method === "POST",
+        ),
+      ).toHaveLength(1);
       const privateEvidence = await readFile(
-        resolve(privateRoot, runId, "result.json"),
+        resolve(privateRoot, guardedRunId, "result.json"),
         "utf8",
       );
       expect(privateEvidence).toContain(
         '"status": "PROVIDER_REPORTED_TERMINAL"',
       );
       expect(privateEvidence).toContain(phone);
-      expect(JSON.stringify(writeOutput.mock.calls)).not.toContain(phone);
+      expect(result.output).not.toContain(phone);
+      expect(result.output).not.toContain(apiKey);
       await expect(readdir(resolve(outside, "tmp"))).rejects.toThrow();
     } finally {
       process.chdir(originalCwd);
-      await removeSession(runId);
+      await removeSession(guardedRunId);
       await rm(outside, { recursive: true, force: true });
     }
   });
 
-  it("returns bounded pending after polling remains active and issues one POST", async () => {
-    const { createCliPreflightProcess } = await freshModule();
-    const runId = "preflight-poll-exhaustion";
-    await removeSession(runId);
-    const fetchMock = vi.fn<typeof fetch>(async (_url, init) =>
-      init?.method === "POST"
-        ? jsonResponse(await fixture("create-accepted.json"), 201)
-        : jsonResponse(await fixture("in-progress.json")),
-    );
-    const writeOutput = vi.fn<(message: string) => void>();
-    const input = cliInput({ writeOutput });
-    const run = createCliPreflightProcess({
-      fetchImpl: fetchMock,
-      clock: immediateClock,
-      ids: { next: () => runId },
+  it("returns bounded pending after guarded polling remains active with one POST", async () => {
+    await removeSession(guardedRunId);
+    const result = await runGuardedCli({
+      apiKey,
+      phone,
+      fetchMock: async (_url, init) =>
+        init?.method === "POST"
+          ? jsonResponse(await fixture("create-accepted.json"), 201)
+          : jsonResponse(await fixture("in-progress.json")),
     });
 
     try {
-      await expect(run(input)).rejects.toMatchObject({
-        code: "CALL_OUTCOME_PENDING",
-      });
+      expect(result.error).toMatchObject({ code: "CALL_OUTCOME_PENDING" });
       expect(
-        fetchMock.mock.calls.filter(
+        result.fetchMock.mock.calls.filter(
           ([, request]) => request?.method === "POST",
         ),
       ).toHaveLength(1);
-      expect(JSON.stringify(writeOutput.mock.calls)).not.toContain('"status"');
+      expect(result.output).not.toContain('"status"');
       await expect(
-        readFile(resolve(privateRoot, runId, "result.json")),
+        readFile(resolve(privateRoot, guardedRunId, "result.json")),
       ).rejects.toThrow();
     } finally {
-      await removeSession(runId);
+      await removeSession(guardedRunId);
     }
   }, 15_000);
 
-  it("fails bounded when event pagination remains incomplete after the limit", async () => {
-    const { createCliPreflightProcess } = await freshModule();
-    const runId = "preflight-event-limit";
-    await removeSession(runId);
+  it("fails bounded when guarded event pagination remains incomplete", async () => {
+    await removeSession(guardedRunId);
     const continuedEvents = JSON.parse(
       await fixture("events-page.json"),
     ) as Record<string, unknown>;
     continuedEvents.next_cursor = "cursor_more";
-    const fetchMock = vi.fn<typeof fetch>(async (url, init) => {
-      if (init?.method === "POST") {
-        return jsonResponse(await fixture("create-accepted.json"), 201);
-      }
-      if (String(url).includes("/events")) {
-        return jsonResponse(JSON.stringify(continuedEvents));
-      }
-      return jsonResponse(await fixture("completed-valid.json"));
-    });
-    const writeOutput = vi.fn<(message: string) => void>();
-    const input = cliInput({ writeOutput });
-    const run = createCliPreflightProcess({
-      fetchImpl: fetchMock,
-      clock: immediateClock,
-      ids: { next: () => runId },
+    const result = await runGuardedCli({
+      apiKey,
+      phone,
+      fetchMock: async (url, init) => {
+        if (init?.method === "POST") {
+          return jsonResponse(await fixture("create-accepted.json"), 201);
+        }
+        if (String(url).includes("/events")) {
+          return jsonResponse(JSON.stringify(continuedEvents));
+        }
+        return jsonResponse(await fixture("completed-valid.json"));
+      },
     });
 
     try {
-      await expect(run(input)).rejects.toMatchObject({
-        code: "CALL_OUTCOME_PENDING",
-      });
+      expect(result.error).toMatchObject({ code: "CALL_OUTCOME_PENDING" });
       expect(
-        fetchMock.mock.calls.filter(
+        result.fetchMock.mock.calls.filter(
           ([, request]) => request?.method === "POST",
         ),
       ).toHaveLength(1);
-      expect(JSON.stringify(writeOutput.mock.calls)).not.toContain(
-        '"eventCount"',
-      );
+      expect(result.output).not.toContain('"eventCount"');
     } finally {
-      await removeSession(runId);
+      await removeSession(guardedRunId);
     }
   });
 
-  it("rejects a redirected private session before any provider POST", async (context) => {
-    const { createCliPreflightProcess } = await freshModule();
-    const runId = "preflight-redirected-session";
-    const session = resolve(privateRoot, runId);
+  it("rejects a pre-existing redirected private session before any provider POST", async (context) => {
+    const session = resolve(privateRoot, guardedRunId);
     const outside = await mkdtemp(resolve(tmpdir(), "supplysignal-redirect-"));
-    await removeSession(runId);
+    await removeSession(guardedRunId);
     await mkdir(privateRoot, { recursive: true });
     try {
       await symlink(
@@ -461,63 +590,225 @@ describe("actual offline CLI composition", () => {
       }
       throw error;
     }
-    const fetchMock = vi.fn<typeof fetch>();
-    const run = createCliPreflightProcess({
-      fetchImpl: fetchMock,
-      clock: immediateClock,
-      ids: { next: () => runId },
-    });
 
     try {
-      await expect(run(cliInput())).rejects.toMatchObject({
-        code: "CALL_OUTCOME_PENDING",
-      });
-      expect(fetchMock).not.toHaveBeenCalled();
+      const result = await runGuardedCli({ apiKey, phone });
+      expect(result.error).toMatchObject({ code: "CALL_OUTCOME_PENDING" });
+      expect(result.fetchMock).not.toHaveBeenCalled();
     } finally {
       await rm(session, { force: true });
       await rm(outside, { recursive: true, force: true });
     }
   });
 
-  it("publishes bounded private evidence create-only without partial authority", async () => {
-    const { writePrivateEvidence } = await freshModule();
-    const runId = "preflight-writer-boundary";
-    await removeSession(runId);
-    const result = terminalRun({ scenario: "answered", phone, apiKey });
-    result.run.id = runId;
+  it("fails bounded when the pinned session is swapped during evidence open", async (context) => {
+    const session = resolve(privateRoot, guardedRunId);
+    const retained = `${session}-retained`;
+    const outside = await mkdtemp(resolve(tmpdir(), "supplysignal-swap-"));
+    await removeSession(guardedRunId);
+    await rm(retained, { recursive: true, force: true });
+    let swapped = false;
+    let platformUnavailable = false;
+    const openedPaths: string[] = [];
+    const result = await runGuardedCli({
+      apiKey,
+      phone,
+      mockFileSystem: (actual) => ({
+        open: async (...arguments_: Parameters<typeof actual.open>) => {
+          const path = String(arguments_[0]);
+          openedPaths.push(path);
+          if (!swapped && path.includes(".result-") && path.endsWith(".tmp")) {
+            try {
+              await actual.rename(session, retained);
+              await actual.symlink(
+                outside,
+                session,
+                process.platform === "win32" ? "junction" : "dir",
+              );
+              swapped = true;
+            } catch (error: unknown) {
+              if (
+                typeof error === "object" &&
+                error !== null &&
+                "code" in error &&
+                (error.code === "EPERM" || error.code === "EACCES")
+              ) {
+                platformUnavailable = true;
+                return actual.open(...arguments_);
+              }
+              throw error;
+            }
+          }
+          return actual.open(...arguments_);
+        },
+      }),
+    });
 
     try {
-      await writePrivateEvidence(result);
-      const first = await readFile(
-        resolve(privateRoot, runId, "result.json"),
-        "utf8",
-      );
-      await expect(writePrivateEvidence(result)).rejects.toMatchObject({
-        code: "CALL_OUTCOME_PENDING",
-      });
+      if (platformUnavailable) {
+        context.skip();
+        return;
+      }
+      expect(openedPaths.some((path) => path.includes(".result-"))).toBe(true);
+      expect(swapped).toBe(true);
+      expect(result.error).toMatchObject({ code: "CALL_OUTCOME_PENDING" });
       expect(
-        await readFile(resolve(privateRoot, runId, "result.json"), "utf8"),
-      ).toBe(first);
-
-      const oversized = structuredClone(result);
-      oversized.run.id = `${runId}-oversized`;
-      oversized.events = [
-        {
-          id: "event_oversized",
-          type: "test",
-          occurredAt: "2026-08-09T10:00:00.000Z",
-          summary: "x".repeat(1_048_577),
-        },
-      ];
-      await expect(writePrivateEvidence(oversized)).rejects.toMatchObject({
-        code: "CALL_OUTCOME_PENDING",
-      });
-      await expect(
-        readFile(resolve(privateRoot, `${runId}-oversized`, "result.json")),
-      ).rejects.toThrow();
-      await removeSession(`${runId}-oversized`);
+        result.fetchMock.mock.calls.filter(
+          ([, request]) => request?.method === "POST",
+        ),
+      ).toHaveLength(1);
+      await expect(readFile(resolve(outside, "result.json"))).rejects.toThrow();
+      await expect(readFile(resolve(session, "result.json"))).rejects.toThrow();
     } finally {
-      await removeSession(runId);
+      await rm(session, { recursive: true, force: true });
+      await rm(retained, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("reports temporary unlink failure and retains fail-closed private state", async () => {
+    const session = resolve(privateRoot, guardedRunId);
+    await removeSession(guardedRunId);
+    const result = await runGuardedCli({
+      apiKey,
+      phone,
+      mockFileSystem: (actual) => ({
+        unlink: async (path: Parameters<typeof actual.unlink>[0]) => {
+          if (
+            String(path).includes(".result-") &&
+            String(path).endsWith(".tmp")
+          ) {
+            const error = new Error(
+              "simulated private cleanup failure",
+            ) as Error & {
+              code: string;
+            };
+            error.code = "EACCES";
+            throw error;
+          }
+          return actual.unlink(path);
+        },
+      }),
+    });
+
+    try {
+      expect(result.error).toMatchObject({ code: "CALL_OUTCOME_PENDING" });
+      expect(result.output).not.toContain('"status"');
+      const entries = await readdir(session);
+      const temporaryName = entries.find(
+        (entry) => entry.startsWith(".result-") && entry.endsWith(".tmp"),
+      );
+      expect(temporaryName).toBeDefined();
+      expect(entries).toContain("result.json");
+      const temporary = await stat(
+        resolve(session, temporaryName ?? "missing"),
+        {
+          bigint: true,
+        },
+      );
+      const final = await stat(resolve(session, "result.json"), {
+        bigint: true,
+      });
+      expect(temporary.dev).toBe(final.dev);
+      expect(temporary.ino).toBe(final.ino);
+      expect(temporary.nlink).toBe(2n);
+      expect(final.nlink).toBe(2n);
+    } finally {
+      await removeSession(guardedRunId);
+    }
+  });
+
+  it("keeps private evidence create-only when the final name already exists", async () => {
+    const session = resolve(privateRoot, guardedRunId);
+    const sentinel = "pre-existing private evidence\n";
+    await removeSession(guardedRunId);
+    let planted = false;
+    const result = await runGuardedCli({
+      apiKey,
+      phone,
+      mockFileSystem: (actual) => ({
+        link: async (existingPath, finalPath) => {
+          if (!planted && String(finalPath).endsWith("result.json")) {
+            await actual.writeFile(finalPath, sentinel, {
+              encoding: "utf8",
+              flag: "wx",
+              mode: 0o600,
+            });
+            planted = true;
+          }
+          return actual.link(existingPath, finalPath);
+        },
+      }),
+    });
+
+    try {
+      expect(planted).toBe(true);
+      expect(result.error).toMatchObject({ code: "CALL_OUTCOME_PENDING" });
+      expect(
+        result.fetchMock.mock.calls.filter(
+          ([, request]) => request?.method === "POST",
+        ),
+      ).toHaveLength(1);
+      expect(await readFile(resolve(session, "result.json"), "utf8")).toBe(
+        sentinel,
+      );
+      expect(
+        (await readdir(session)).filter((entry) => entry.endsWith(".tmp")),
+      ).toHaveLength(0);
+    } finally {
+      await removeSession(guardedRunId);
+    }
+  });
+
+  it("rejects oversized private evidence before publishing a final file", async () => {
+    await removeSession(guardedRunId);
+    const basePage = JSON.parse(await fixture("events-page.json")) as Record<
+      string,
+      unknown
+    >;
+    const baseEvent = (basePage.data as Record<string, unknown>[])[0];
+    if (baseEvent === undefined) {
+      throw new Error("Expected an event fixture");
+    }
+    let eventPage = 0;
+    const result = await runGuardedCli({
+      apiKey,
+      phone,
+      fetchMock: async (url, init) => {
+        if (init?.method === "POST") {
+          return jsonResponse(await fixture("create-accepted.json"), 201);
+        }
+        if (!String(url).includes("/events")) {
+          return jsonResponse(await fixture("completed-valid.json"));
+        }
+        eventPage += 1;
+        return jsonResponse(
+          JSON.stringify({
+            object: "list",
+            data: Array.from({ length: 50 }, (_, index) => ({
+              ...baseEvent,
+              id: `event_${eventPage}_${index}`,
+              message: "x".repeat(4_000),
+            })),
+            next_cursor: eventPage < 10 ? `cursor_${eventPage}` : null,
+          }),
+        );
+      },
+    });
+
+    try {
+      expect(eventPage).toBe(10);
+      expect(result.error).toMatchObject({ code: "CALL_OUTCOME_PENDING" });
+      expect(
+        result.fetchMock.mock.calls.filter(
+          ([, request]) => request?.method === "POST",
+        ),
+      ).toHaveLength(1);
+      await expect(
+        readFile(resolve(privateRoot, guardedRunId, "result.json")),
+      ).rejects.toThrow();
+    } finally {
+      await removeSession(guardedRunId);
     }
   });
 });
