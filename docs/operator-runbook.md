@@ -6,7 +6,9 @@ or from CI. The public replay cannot place calls.
 
 ## Safety boundary
 
-Every invocation permits at most one call creation attempt. The harness:
+Every process permits at most one call creation attempt. One atomic permit is
+shared across all harness entry points and is reserved before any interactive
+wait. The harness:
 
 - accepts exactly one scenario: `answered`, `declined`, or `no_answer`;
 - reads the recipient only from the server-side `SUPPLIER_TEST_PHONE`
@@ -17,7 +19,8 @@ Every invocation permits at most one call creation attempt. The harness:
 - uses the existing CALL-E adapter, stored call identifier, and reconciliation
   lifecycle;
 - never retries or redials the create request; and
-- stores private run evidence only below ignored `tmp/preflight-private/`.
+- stores private run evidence only below the repository-anchored, ignored
+  `tmp/preflight-private/<run-id>/` directory.
 
 Do not rerun a scenario to recover from a timeout or an empty CALL-E Dashboard.
 An ambiguous response may still mean that the provider created the call. Keep
@@ -145,13 +148,17 @@ call identifier, transcript, or structured provider result and therefore stay
 under:
 
 ```text
-tmp/preflight-private/
+tmp/preflight-private/<run-id>/
 ```
 
-That directory is Git-ignored. Do not move its contents into `docs/`,
-`examples/`, screenshots, the public replay, or the demo video. The later
-public preflight report may contain only an allowlisted projection: scenario,
-date, application commit, OpenAPI version, call-ID hash, sanitized timestamps,
+The root is derived from the script location, not the terminal's current
+directory. The harness rejects redirected, symbolic-link, junction, or reparse
+components before provider execution. The final private result is bounded,
+create-only, and atomically linked from a synchronized temporary file. That
+directory is Git-ignored. Do not move its contents into `docs/`, `examples/`,
+screenshots, the public replay, or the demo video. The later public preflight
+report may contain only an allowlisted projection: scenario, date, application
+commit, OpenAPI version, call-ID hash, sanitized timestamps,
 observed-versus-reported comparison, Dashboard visibility as informational
 context, and the final pass/fail decision.
 
@@ -166,7 +173,9 @@ context, and the final pass/fail decision.
 - `UNSUPPORTED_RECIPIENT_REGION`: review the number. This vertical slice does
   not call non-US numbers.
 - `CALL_OUTCOME_PENDING`: do not rerun the harness. Preserve private state and
-  reconcile or escalate the existing call.
+  reconcile or escalate the existing call. This includes bounded polling that
+  ended while the call was still active and event pagination that remained
+  incomplete after its safety limit; neither case prints a successful result.
 - Ringing without usable audio, a physical/provider outcome conflict, invented
   transcript or supplier facts, or a delayed duplicate call: stop expansion.
   Preserve private evidence and request an owner-approved design amendment

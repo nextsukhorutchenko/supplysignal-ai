@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { link, lstat, mkdir, open, realpath, unlink } from "node:fs/promises";
+import { isAbsolute, relative, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createInterface } from "node:readline/promises";
 
 import { z } from "zod";
@@ -10,10 +10,15 @@ import { CalleClient } from "../src/adapters/calle/client.js";
 import { FileRunStore } from "../src/adapters/filesystem/run-store.js";
 import { authorizeRun } from "../src/application/authorize-run.js";
 import { createRun } from "../src/application/create-run.js";
-import type { CalleEventPage, Clock } from "../src/application/ports.js";
+import type {
+  CalleEventPage,
+  Clock,
+  IdGenerator,
+} from "../src/application/ports.js";
 import { reconcileRun } from "../src/application/reconcile-run.js";
 import { startRun } from "../src/application/start-run.js";
 import { createCallRecipient } from "../src/domain/call-recipient.js";
+import { AppError } from "../src/domain/errors.js";
 import {
   runRecordSchema,
   transitionRun,
@@ -22,11 +27,14 @@ import {
 } from "../src/domain/run.js";
 
 const AUTHORIZATION_PHRASE = "AUTHORIZE ONE CALL";
-const PRIVATE_ROOT = resolve("tmp", "preflight-private");
+const SCRIPT_DIRECTORY = fileURLToPath(new URL(".", import.meta.url));
+const REPOSITORY_ROOT = resolve(SCRIPT_DIRECTORY, "..");
 const CALLE_BASE_URL = "https://api.heycall-e.com";
 const POLL_DELAY_MILLISECONDS = 5_000;
 const MAX_POLL_READS = 60;
 const MAX_EVENT_PAGES = 10;
+const MAX_PRIVATE_EVIDENCE_BYTES = 1_048_576;
+const SAFE_RUN_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
 const scenarioSchema = z.enum(["answered", "declined", "no_answer"]);
 
@@ -76,6 +84,10 @@ export type PreflightSummary = {
   providerStatus: ProviderEvidenceSnapshot["status"] | "not_available";
   eventCount: number;
 };
+
+type PermitState = "available" | "reserved" | "consumed";
+
+let permitState: PermitState = "available";
 
 function fail(code: PreflightErrorCode): never {
   throw new PreflightError(code);
@@ -127,8 +139,6 @@ function requireConfiguration(env: PreflightProcessInput["env"]): {
 }
 
 export function createPreflightProcess() {
-  let callExecutionStarted = false;
-
   return async function runPreflight(
     input: PreflightProcessInput,
   ): Promise<PreflightSummary> {
@@ -137,19 +147,27 @@ export function createPreflightProcess() {
     if (!input.isInteractive) {
       fail("PREFLIGHT_INTERACTIVE_REQUIRED");
     }
-    if (callExecutionStarted) {
+    if (permitState !== "available") {
       fail("PREFLIGHT_CALL_LIMIT_REACHED");
     }
+    permitState = "reserved";
 
-    input.writeOutput(
-      `Scenario: ${scenario}\nRecipient: ${configuration.maskedPhone}`,
-    );
-    const confirmation = await input.prompt(`Type ${AUTHORIZATION_PHRASE}: `);
-    if (confirmation !== AUTHORIZATION_PHRASE) {
-      fail("AUTHORIZATION_REQUIRED");
+    try {
+      input.writeOutput(
+        `Scenario: ${scenario}\nRecipient: ${configuration.maskedPhone}`,
+      );
+      const confirmation = await input.prompt(`Type ${AUTHORIZATION_PHRASE}: `);
+      if (confirmation !== AUTHORIZATION_PHRASE) {
+        fail("AUTHORIZATION_REQUIRED");
+      }
+    } catch (error: unknown) {
+      if (permitState === "reserved") {
+        permitState = "available";
+      }
+      throw error;
     }
 
-    callExecutionStarted = true;
+    permitState = "consumed";
     const result = await input.execute({
       scenario,
       phone: configuration.phone,
@@ -177,6 +195,95 @@ const systemClock: Clock = {
   },
 };
 
+function isNodeError(error: unknown, code: string): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === code
+  );
+}
+
+function normalizedPath(path: string): string {
+  const absolute = resolve(path);
+  return process.platform === "win32" ? absolute.toLowerCase() : absolute;
+}
+
+function requireContained(parent: string, child: string): void {
+  const fromParent = relative(parent, child);
+  if (
+    fromParent === "" ||
+    fromParent === ".." ||
+    fromParent.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) ||
+    isAbsolute(fromParent)
+  ) {
+    fail("CALL_OUTCOME_PENDING");
+  }
+}
+
+async function attestExistingDirectory(path: string): Promise<string> {
+  try {
+    const configured = resolve(path);
+    const before = await lstat(configured);
+    if (!before.isDirectory() || before.isSymbolicLink()) {
+      fail("CALL_OUTCOME_PENDING");
+    }
+    const canonical = await realpath(configured);
+    const after = await lstat(configured);
+    if (
+      !after.isDirectory() ||
+      after.isSymbolicLink() ||
+      normalizedPath(canonical) !== normalizedPath(configured)
+    ) {
+      fail("CALL_OUTCOME_PENDING");
+    }
+    return canonical;
+  } catch (error: unknown) {
+    if (error instanceof PreflightError) {
+      throw error;
+    }
+    fail("CALL_OUTCOME_PENDING");
+  }
+}
+
+async function establishChildDirectory(
+  parent: string,
+  name: string,
+): Promise<string> {
+  const child = resolve(parent, name);
+  requireContained(parent, child);
+  try {
+    await mkdir(child, { mode: 0o700 });
+  } catch (error: unknown) {
+    if (!isNodeError(error, "EEXIST")) {
+      fail("CALL_OUTCOME_PENDING");
+    }
+  }
+  const canonical = await attestExistingDirectory(child);
+  requireContained(parent, canonical);
+  return canonical;
+}
+
+type PrivateSession = {
+  root: string;
+  runs: string;
+};
+
+async function establishPrivateSession(runId: string): Promise<PrivateSession> {
+  if (!SAFE_RUN_ID.test(runId)) {
+    fail("CALL_OUTCOME_PENDING");
+  }
+  const repository = await attestExistingDirectory(REPOSITORY_ROOT);
+  const temporary = await establishChildDirectory(repository, "tmp");
+  const privateDirectory = await establishChildDirectory(
+    temporary,
+    "preflight-private",
+  );
+  const session = await establishChildDirectory(privateDirectory, runId);
+  const runs = await establishChildDirectory(session, "runs");
+  return { root: session, runs };
+}
+
 async function collectEvents(
   calle: CalleClient,
   callId: string,
@@ -191,26 +298,37 @@ async function collectEvents(
     }
     cursor = result.nextCursor;
   }
-  return events;
+  fail("CALL_OUTCOME_PENDING");
 }
 
-async function executeLivePreflight(
+export type LivePreflightRuntimeOptions = {
+  fetchImpl: typeof fetch;
+  clock: Clock;
+  ids?: IdGenerator;
+};
+
+export async function executeLivePreflight(
   input: PreflightExecutionInput,
+  options: LivePreflightRuntimeOptions,
 ): Promise<PreflightExecutionResult> {
+  const runId =
+    options.ids?.next() ??
+    `preflight-${input.scenario}-${randomUUID().replaceAll("-", "")}`;
+  const privateSession = await establishPrivateSession(runId);
   const store = new FileRunStore({
-    root: resolve(PRIVATE_ROOT, "runs"),
-    clock: systemClock,
+    root: privateSession.runs,
+    clock: options.clock,
   });
   const calle = new CalleClient({
     apiKey: input.apiKey,
     baseUrl: CALLE_BASE_URL,
-    fetch,
+    fetch: options.fetchImpl,
+    sleep: (milliseconds) => options.clock.sleep(milliseconds),
   });
-  const runId = `preflight-${input.scenario}-${randomUUID().replaceAll("-", "")}`;
   const draft = await createRun(
     {
       store,
-      clock: systemClock,
+      clock: options.clock,
       ids: { next: () => runId },
     },
     {
@@ -230,7 +348,7 @@ async function executeLivePreflight(
   );
   const awaiting = runRecordSchema.parse({
     ...transitionRun(draft, "AWAITING_APPROVAL"),
-    updatedAt: systemClock.now(),
+    updatedAt: options.clock.now(),
   });
   const reviewed = await store.compareAndSwap(
     draft.id,
@@ -238,7 +356,7 @@ async function executeLivePreflight(
     awaiting,
   );
   const authorized = await authorizeRun(
-    { store, clock: systemClock },
+    { store, clock: options.clock },
     {
       runId,
       expectedVersion: reviewed.version,
@@ -256,7 +374,18 @@ async function executeLivePreflight(
   );
   void authorized;
 
-  let current = await startRun({ store, calle, clock: systemClock }, runId);
+  let current: RunRecord;
+  try {
+    current = await startRun({ store, calle, clock: options.clock }, runId);
+  } catch (error: unknown) {
+    if (!(error instanceof AppError) || error.code !== "CALL_OUTCOME_PENDING") {
+      throw error;
+    }
+    current = runRecordSchema.parse(await store.read(runId));
+    if (current.callId === undefined) {
+      throw error;
+    }
+  }
   for (let read = 0; read < MAX_POLL_READS; read += 1) {
     if (
       current.status === "PROVIDER_REPORTED_TERMINAL" ||
@@ -265,27 +394,92 @@ async function executeLivePreflight(
     ) {
       break;
     }
-    await systemClock.sleep(POLL_DELAY_MILLISECONDS);
-    current = await reconcileRun({ store, calle, clock: systemClock }, runId);
+    await options.clock.sleep(POLL_DELAY_MILLISECONDS);
+    try {
+      current = await reconcileRun(
+        { store, calle, clock: options.clock },
+        runId,
+      );
+    } catch (error: unknown) {
+      if (
+        !(error instanceof AppError) ||
+        error.code !== "CALL_OUTCOME_PENDING"
+      ) {
+        throw error;
+      }
+      current = runRecordSchema.parse(await store.read(runId));
+    }
   }
 
-  if (current.callId === undefined) {
+  if (
+    current.callId === undefined ||
+    current.status === "CALL_STARTING" ||
+    current.status === "CALL_IN_PROGRESS" ||
+    current.status === "RECONCILING"
+  ) {
     fail("CALL_OUTCOME_PENDING");
   }
   const events = await collectEvents(calle, current.callId);
   return { run: current, events };
 }
 
-async function writePrivateEvidence(
+export async function writePrivateEvidence(
   result: PreflightExecutionResult,
 ): Promise<void> {
-  await mkdir(PRIVATE_ROOT, { recursive: true });
-  const fileName = `${result.run.id}.result.json`;
-  await writeFile(
-    resolve(PRIVATE_ROOT, fileName),
-    `${JSON.stringify(result, null, 2)}\n`,
-    { encoding: "utf8", flag: "wx", mode: 0o600 },
+  let serialized: string;
+  try {
+    serialized = `${JSON.stringify(result, null, 2)}\n`;
+  } catch {
+    fail("CALL_OUTCOME_PENDING");
+  }
+  if (Buffer.byteLength(serialized, "utf8") > MAX_PRIVATE_EVIDENCE_BYTES) {
+    fail("CALL_OUTCOME_PENDING");
+  }
+
+  const session = await establishPrivateSession(result.run.id);
+  const finalPath = resolve(session.root, "result.json");
+  const temporaryPath = resolve(
+    session.root,
+    `.result-${randomUUID().replaceAll("-", "")}.tmp`,
   );
+  requireContained(session.root, finalPath);
+  requireContained(session.root, temporaryPath);
+
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(temporaryPath, "wx", 0o600);
+    await handle.writeFile(serialized, "utf8");
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await link(temporaryPath, finalPath);
+    await unlink(temporaryPath).catch(() => undefined);
+  } catch {
+    await handle?.close().catch(() => undefined);
+    await unlink(temporaryPath).catch(() => undefined);
+    fail("CALL_OUTCOME_PENDING");
+  }
+}
+
+export type CliPreflightProcessInput = Pick<
+  PreflightProcessInput,
+  "argv" | "env" | "isInteractive" | "prompt" | "writeOutput"
+>;
+
+export function createCliPreflightProcess(
+  options: LivePreflightRuntimeOptions = {
+    fetchImpl: fetch,
+    clock: systemClock,
+  },
+) {
+  const run = createPreflightProcess();
+  return async (input: CliPreflightProcessInput): Promise<PreflightSummary> =>
+    run({
+      ...input,
+      execute: (executionInput) =>
+        executeLivePreflight(executionInput, options),
+      writePrivateEvidence,
+    });
 }
 
 async function promptOperator(question: string): Promise<string> {
@@ -301,15 +495,13 @@ async function promptOperator(question: string): Promise<string> {
 }
 
 async function main(): Promise<void> {
-  const run = createPreflightProcess();
+  const run = createCliPreflightProcess();
   await run({
     argv: process.argv.slice(2),
     env: process.env,
     isInteractive:
       process.stdin.isTTY === true && process.stdout.isTTY === true,
     prompt: promptOperator,
-    execute: executeLivePreflight,
-    writePrivateEvidence,
     writeOutput: (message) => process.stdout.write(`${message}\n`),
   });
 }
