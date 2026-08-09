@@ -333,9 +333,33 @@ export class FileRunStore implements RunStore {
     let operationError: unknown;
     try {
       const serialized = JSON.stringify(record);
-      handle = await open(temporaryPath, "wx", 0o600);
+      const serializedBytes = Buffer.from(serialized, "utf8");
+      if (serializedBytes.length > MAX_RUN_FILE_BYTES) {
+        fail("RUN_STORE_WRITE_FAILED");
+      }
+      handle = await open(temporaryPath, "wx+", 0o600);
       await handle.writeFile(serialized, "utf8");
       await handle.sync();
+      const attestedBytes = Buffer.alloc(serializedBytes.length + 1);
+      let attestedLength = 0;
+      while (attestedLength < attestedBytes.length) {
+        const result = await handle.read(
+          attestedBytes,
+          attestedLength,
+          attestedBytes.length - attestedLength,
+          attestedLength,
+        );
+        if (result.bytesRead === 0) {
+          break;
+        }
+        attestedLength += result.bytesRead;
+      }
+      if (
+        attestedLength !== serializedBytes.length ||
+        !attestedBytes.subarray(0, attestedLength).equals(serializedBytes)
+      ) {
+        fail("RUN_STORE_WRITE_FAILED");
+      }
       const opened = await handle.stat({ bigint: true });
       const beforePath = await lstat(temporaryPath, { bigint: true });
       if (
@@ -344,7 +368,7 @@ export class FileRunStore implements RunStore {
         beforePath.isSymbolicLink() ||
         opened.nlink !== 1n ||
         beforePath.nlink !== 1n ||
-        opened.size !== BigInt(Buffer.byteLength(serialized, "utf8")) ||
+        opened.size !== BigInt(serializedBytes.length) ||
         !sameStableMetadata(opened, beforePath)
       ) {
         fail("RUN_STORE_WRITE_FAILED");
@@ -400,6 +424,16 @@ export class FileRunStore implements RunStore {
 
     if (operationError === undefined) {
       try {
+        if ((await this.#verifyRoot("RUN_STORE_WRITE_FAILED")) !== root) {
+          fail("RUN_STORE_INVALID_ROOT");
+        }
+      } catch (error: unknown) {
+        operationError = error;
+      }
+    }
+
+    if (operationError === undefined) {
+      try {
         await unlink(temporaryPath);
         return;
       } catch (error: unknown) {
@@ -407,19 +441,31 @@ export class FileRunStore implements RunStore {
       }
     }
 
-    if (finalLinked) {
-      let finalRollbackSucceeded = false;
-      try {
-        await unlink(finalPath);
-        finalRollbackSucceeded = true;
-      } catch (error: unknown) {
-        operationError = error;
+    let cleanupRootVerified = false;
+    try {
+      if ((await this.#verifyRoot("RUN_STORE_WRITE_FAILED")) !== root) {
+        fail("RUN_STORE_INVALID_ROOT");
       }
-      if (finalRollbackSucceeded) {
+      cleanupRootVerified = true;
+    } catch (error: unknown) {
+      operationError = error;
+    }
+
+    if (cleanupRootVerified) {
+      if (finalLinked) {
+        let finalRollbackSucceeded = false;
+        try {
+          await unlink(finalPath);
+          finalRollbackSucceeded = true;
+        } catch (error: unknown) {
+          operationError = error;
+        }
+        if (finalRollbackSucceeded) {
+          await unlinkBestEffort(temporaryPath);
+        }
+      } else {
         await unlinkBestEffort(temporaryPath);
       }
-    } else {
-      await unlinkBestEffort(temporaryPath);
     }
     preserveOrFail(operationError, "RUN_STORE_WRITE_FAILED");
   }
