@@ -79,6 +79,7 @@ function snapshot(
 class MemoryStore implements RunStore {
   readonly swaps: RunRecord[] = [];
   failNextSwap = false;
+  advanceBeforeNextSwap: (() => void) | undefined;
 
   constructor(public current: RunRecord) {}
 
@@ -95,6 +96,9 @@ class MemoryStore implements RunStore {
     expectedVersion: number,
     next: RunRecord,
   ): Promise<RunRecord> {
+    const advance = this.advanceBeforeNextSwap;
+    this.advanceBeforeNextSwap = undefined;
+    advance?.();
     if (this.failNextSwap) {
       this.failNextSwap = false;
       throw new Error("RUN_STORE_WRITE_FAILED");
@@ -229,7 +233,7 @@ describe("startRun", () => {
     expect(calle.createInputs[1]).toEqual(calle.createInputs[0]);
   });
 
-  it("retains the original identity on an idempotency conflict", async () => {
+  it("makes a definite idempotency conflict terminal without a recovery POST", async () => {
     const store = new MemoryStore(authorizedRun());
     const calle = new FakeCalle();
     calle.createImplementation = async () => {
@@ -242,19 +246,115 @@ describe("startRun", () => {
     );
     const key = store.current.idempotencyKey;
     const digest = store.current.requestDigest;
-    await expectCode(
-      startRun({ store, calle, clock }, "run-001"),
-      "CALL_CREATION_FAILED",
-    );
+    const second = await startRun({ store, calle, clock }, "run-001");
 
+    expect(second.status).toBe("FAILED");
     expect(calle.createInputs.map((input) => input.idempotencyKey)).toEqual([
-      key,
       key,
     ]);
     expect(store.current).toMatchObject({
+      status: "FAILED",
       idempotencyKey: key,
       requestDigest: digest,
     });
+  });
+
+  it("does not report success when call-ID persistence loses to a newer no-ID winner", async () => {
+    const store = new MemoryStore(authorizedRun());
+    const calle = new FakeCalle();
+    calle.createImplementation = async () => {
+      store.advanceBeforeNextSwap = () => {
+        store.current = {
+          ...store.current,
+          version: store.current.version + 1,
+          status: "RECONCILING",
+        };
+      };
+      return snapshot();
+    };
+
+    await expectCode(
+      startRun({ store, calle, clock }, "run-001"),
+      "CALL_OUTCOME_PENDING",
+    );
+    const originalKey = store.current.idempotencyKey;
+    expect(store.current).not.toHaveProperty("callId");
+
+    calle.createImplementation = async () => snapshot();
+    const recovered = await startRun({ store, calle, clock }, "run-001");
+
+    expect(recovered.callId).toBe("call_demo_001");
+    expect(calle.createInputs.map((input) => input.idempotencyKey)).toEqual([
+      originalKey,
+      originalKey,
+    ]);
+  });
+
+  it.each(["success", "ambiguous"] as const)(
+    "detaches gateway input on the %s create path",
+    async (outcome) => {
+      const original = authorizedRun();
+      const store = new MemoryStore(original);
+      const calle = new FakeCalle();
+      calle.createImplementation = async (input) => {
+        input.order.expectedQuantity = 1;
+        input.recipient.recipientName = "Mutated by provider";
+        if (outcome === "ambiguous") {
+          throw new CalleError("CALL_OUTCOME_PENDING", "ambiguous_create");
+        }
+        return snapshot();
+      };
+
+      if (outcome === "ambiguous") {
+        await expectCode(
+          startRun({ store, calle, clock }, "run-001"),
+          "CALL_OUTCOME_PENDING",
+        );
+      } else {
+        await startRun({ store, calle, clock }, "run-001");
+      }
+
+      expect(store.current.order).toEqual(original.order);
+      expect(store.current.recipient).toEqual(original.recipient);
+      expect(calle.createInputs[0]?.idempotencyKey).toBe(
+        store.current.idempotencyKey,
+      );
+    },
+  );
+
+  it("bounds an invalid clock value after provider response and preserves same-key recovery", async () => {
+    let now = fixedNow;
+    const changingClock: Clock = {
+      now: () => now,
+      sleep: async () => undefined,
+    };
+    const store = new MemoryStore(authorizedRun());
+    const calle = new FakeCalle();
+    calle.createImplementation = async () => {
+      now = "not-an-iso-timestamp";
+      return snapshot();
+    };
+
+    await expectCode(
+      startRun({ store, calle, clock: changingClock }, "run-001"),
+      "CALL_OUTCOME_PENDING",
+    );
+    const originalKey = store.current.idempotencyKey;
+    expect(store.current.status).toBe("CALL_STARTING");
+    expect(store.current).not.toHaveProperty("callId");
+
+    now = fixedNow;
+    calle.createImplementation = async () => snapshot();
+    const recovered = await startRun(
+      { store, calle, clock: changingClock },
+      "run-001",
+    );
+
+    expect(recovered.callId).toBe("call_demo_001");
+    expect(calle.createInputs.map((input) => input.idempotencyKey)).toEqual([
+      originalKey,
+      originalKey,
+    ]);
   });
 
   it("treats call-identity persistence failure as pending and recovers with the same request", async () => {

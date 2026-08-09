@@ -1,4 +1,7 @@
 import { AppError } from "../domain/errors.js";
+import { isoTimestampSchema } from "../domain/authorization.js";
+import { callRecipientSchema } from "../domain/call-recipient.js";
+import { purchaseOrderSchema } from "../domain/purchase-order.js";
 import {
   providerEvidenceSnapshotSchema,
   runRecordSchema,
@@ -33,7 +36,11 @@ function bounded(code: ConstructorParameters<typeof AppError>[0]): AppError {
 
 function safeNow(clock: Clock): string {
   try {
-    return clock.now();
+    const parsed = isoTimestampSchema.safeParse(clock.now());
+    if (!parsed.success) {
+      throw bounded("CALL_OUTCOME_PENDING");
+    }
+    return parsed.data;
   } catch {
     throw bounded("CALL_OUTCOME_PENDING");
   }
@@ -80,9 +87,16 @@ function createInput(run: RunRecord): CreateSupplierCall {
   return {
     runId: run.id,
     idempotencyKey: run.idempotencyKey,
-    order: run.order,
-    recipient: run.recipient,
+    order: purchaseOrderSchema.parse(run.order),
+    recipient: callRecipientSchema.parse(run.recipient),
   };
+}
+
+function sameSnapshot(
+  first: RunRecord["providerSnapshot"],
+  second: RunRecord["providerSnapshot"],
+): boolean {
+  return JSON.stringify(first) === JSON.stringify(second);
 }
 
 async function compareAndSwap(
@@ -105,12 +119,18 @@ async function compareAndSwap(
     ) {
       throw bounded("PROVIDER_RESULT_CONFLICT");
     }
-    if (
-      current.callId !== undefined &&
-      winner.callId !== undefined &&
-      current.callId !== winner.callId
-    ) {
+    const candidateIds = [current.callId, next.callId, winner.callId].filter(
+      (value): value is string => value !== undefined,
+    );
+    if (new Set(candidateIds).size > 1) {
       throw bounded("PROVIDER_RESULT_CONFLICT");
+    }
+    if (
+      (next.callId !== undefined && winner.callId === undefined) ||
+      winner.status !== next.status ||
+      !sameSnapshot(winner.providerSnapshot, next.providerSnapshot)
+    ) {
+      throw bounded("CALL_OUTCOME_PENDING");
     }
     return winner;
   }
@@ -171,7 +191,7 @@ function mappedStatus(status: ProviderEvidenceSnapshot["status"]): RunStatus {
   }
 }
 
-export async function persistProviderSnapshot(
+async function persistProviderSnapshotInternal(
   dependencies: ReconcileRunDependencies,
   current: RunRecord,
   input: unknown,
@@ -205,6 +225,21 @@ export async function persistProviderSnapshot(
   return persistStatus(dependencies, base, target, snapshot);
 }
 
+export async function persistProviderSnapshot(
+  dependencies: ReconcileRunDependencies,
+  current: RunRecord,
+  input: unknown,
+): Promise<RunRecord> {
+  try {
+    return await persistProviderSnapshotInternal(dependencies, current, input);
+  } catch (error: unknown) {
+    if (error instanceof AppError) {
+      throw error;
+    }
+    throw bounded("CALL_OUTCOME_PENDING");
+  }
+}
+
 async function persistPending(
   dependencies: ReconcileRunDependencies,
   current: RunRecord,
@@ -213,7 +248,7 @@ async function persistPending(
   throw bounded("CALL_OUTCOME_PENDING");
 }
 
-export async function reconcileRun(
+async function reconcileRunInternal(
   dependencies: ReconcileRunDependencies,
   runId: string,
 ): Promise<RunRecord> {
@@ -241,12 +276,30 @@ export async function reconcileRun(
       snapshot = await dependencies.calle.createCall(input);
     } catch (error: unknown) {
       if (error instanceof AppError && error.code === "CALL_CREATION_FAILED") {
-        await ensureReconciliationState(dependencies, current);
+        await persistStatus(dependencies, current, "FAILED");
         throw bounded("CALL_CREATION_FAILED");
       }
-      return persistPending(dependencies, current);
+      if (error instanceof AppError && error.code === "CALL_OUTCOME_PENDING") {
+        return persistPending(dependencies, current);
+      }
+      await persistStatus(dependencies, current, "FAILED");
+      throw bounded("CALL_CREATION_FAILED");
     }
   }
 
   return persistProviderSnapshot(dependencies, current, snapshot);
+}
+
+export async function reconcileRun(
+  dependencies: ReconcileRunDependencies,
+  runId: string,
+): Promise<RunRecord> {
+  try {
+    return await reconcileRunInternal(dependencies, runId);
+  } catch (error: unknown) {
+    if (error instanceof AppError) {
+      throw error;
+    }
+    throw bounded("CALL_OUTCOME_PENDING");
+  }
 }

@@ -1,4 +1,7 @@
 import { AppError } from "../domain/errors.js";
+import { isoTimestampSchema } from "../domain/authorization.js";
+import { callRecipientSchema } from "../domain/call-recipient.js";
+import { purchaseOrderSchema } from "../domain/purchase-order.js";
 import {
   runRecordSchema,
   transitionRun,
@@ -25,7 +28,11 @@ function bounded(code: ConstructorParameters<typeof AppError>[0]): AppError {
 
 function safeNow(clock: Clock): string {
   try {
-    return clock.now();
+    const parsed = isoTimestampSchema.safeParse(clock.now());
+    if (!parsed.success) {
+      throw bounded("CALL_OUTCOME_PENDING");
+    }
+    return parsed.data;
   } catch {
     throw bounded("CALL_OUTCOME_PENDING");
   }
@@ -104,9 +111,49 @@ function createInput(run: RunRecord): CreateSupplierCall {
   return {
     runId: run.id,
     idempotencyKey: identity.idempotencyKey,
-    order: run.order,
-    recipient: run.recipient,
+    order: purchaseOrderSchema.parse(run.order),
+    recipient: callRecipientSchema.parse(run.recipient),
   };
+}
+
+async function persistDefiniteFailure(
+  dependencies: StartRunDependencies,
+  current: RunRecord,
+): Promise<RunRecord> {
+  if (current.status === "FAILED") {
+    return current;
+  }
+  const next = runRecordSchema.parse({
+    ...transitionRun(current, "FAILED"),
+    updatedAt: safeNow(dependencies.clock),
+  });
+  try {
+    return runRecordSchema.parse(
+      await dependencies.store.compareAndSwap(
+        current.id,
+        current.version,
+        next,
+      ),
+    );
+  } catch {
+    const winner = await readRun(dependencies.store, current.id);
+    if (
+      winner.status === "FAILED" &&
+      winner.idempotencyKey === current.idempotencyKey &&
+      winner.requestDigest === current.requestDigest &&
+      winner.callId === current.callId
+    ) {
+      return winner;
+    }
+    if (
+      winner.callId !== undefined &&
+      current.callId !== undefined &&
+      winner.callId !== current.callId
+    ) {
+      throw bounded("PROVIDER_RESULT_CONFLICT");
+    }
+    throw bounded("CALL_OUTCOME_PENDING");
+  }
 }
 
 async function persistReconciliation(
@@ -127,7 +174,7 @@ async function persistReconciliation(
   }
 }
 
-export async function startRun(
+async function startRunInternal(
   dependencies: StartRunDependencies,
   runId: string,
 ): Promise<RunRecord> {
@@ -154,18 +201,32 @@ export async function startRun(
     return persistProviderSnapshot(dependencies, current, snapshot);
   } catch (error: unknown) {
     if (error instanceof AppError && error.code === "CALL_CREATION_FAILED") {
-      await persistReconciliation(dependencies, current);
+      await persistDefiniteFailure(dependencies, current);
       throw bounded("CALL_CREATION_FAILED");
     }
     if (error instanceof AppError && error.code === "PROVIDER_RESULT_INVALID") {
-      await persistReconciliation(dependencies, current);
+      await persistDefiniteFailure(dependencies, current);
       throw bounded("PROVIDER_RESULT_INVALID");
     }
-    await persistReconciliation(dependencies, current);
-    throw bounded(
-      error instanceof AppError && error.code === "CALL_OUTCOME_PENDING"
-        ? "CALL_OUTCOME_PENDING"
-        : "CALL_CREATION_FAILED",
-    );
+    if (error instanceof AppError && error.code === "CALL_OUTCOME_PENDING") {
+      await persistReconciliation(dependencies, current);
+      throw bounded("CALL_OUTCOME_PENDING");
+    }
+    await persistDefiniteFailure(dependencies, current);
+    throw bounded("CALL_CREATION_FAILED");
+  }
+}
+
+export async function startRun(
+  dependencies: StartRunDependencies,
+  runId: string,
+): Promise<RunRecord> {
+  try {
+    return await startRunInternal(dependencies, runId);
+  } catch (error: unknown) {
+    if (error instanceof AppError) {
+      throw error;
+    }
+    throw bounded("CALL_OUTCOME_PENDING");
   }
 }

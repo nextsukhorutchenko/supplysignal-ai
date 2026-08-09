@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { CalleError } from "../adapters/calle/client.js";
+import { AppError } from "../domain/errors.js";
 import type { ProviderEvidenceSnapshot, RunRecord } from "../domain/run.js";
 import { deriveCallIdentity } from "./idempotency.js";
 import { reconcileRun } from "./reconcile-run.js";
@@ -136,6 +137,41 @@ class FakeCalle implements CalleGateway {
   }
 }
 
+class TerminalRaceStore implements RunStore {
+  private failedPersistedResolve: (() => void) | undefined;
+  private readonly failedPersisted = new Promise<void>((resolve) => {
+    this.failedPersistedResolve = resolve;
+  });
+
+  constructor(public current: RunRecord) {}
+
+  async create(): Promise<void> {
+    throw new Error("unused");
+  }
+
+  async read(): Promise<RunRecord> {
+    return structuredClone(this.current);
+  }
+
+  async compareAndSwap(
+    _id: string,
+    expected: number,
+    next: RunRecord,
+  ): Promise<RunRecord> {
+    if (next.status === "RECONCILING") {
+      await this.failedPersisted;
+    }
+    if (this.current.version !== expected) {
+      throw new Error("RUN_STORE_CONFLICT");
+    }
+    this.current = structuredClone(next);
+    if (next.status === "FAILED") {
+      this.failedPersistedResolve?.();
+    }
+    return structuredClone(next);
+  }
+}
+
 describe("reconcileRun", () => {
   it("recovers a restart at CALL_STARTING with the persisted key and request", async () => {
     const original = activeRun({ status: "CALL_STARTING" });
@@ -220,5 +256,56 @@ describe("reconcileRun", () => {
     expect(store.current.status).toBe("RECONCILING");
     expect(store.current.idempotencyKey).toBe(activeRun().idempotencyKey);
     expect(calle.creates).toHaveLength(1);
+  });
+
+  it("makes a definite recovery rejection terminal without another POST", async () => {
+    const store = new MemoryStore(activeRun());
+    const calle = new FakeCalle();
+    calle.createResult = new CalleError(
+      "CALL_CREATION_FAILED",
+      "idempotency_conflict",
+    );
+
+    await expect(
+      reconcileRun({ store, calle, clock }, "run-001"),
+    ).rejects.toMatchObject({ code: "CALL_CREATION_FAILED" });
+    const second = await reconcileRun({ store, calle, clock }, "run-001");
+
+    expect(store.current.status).toBe("FAILED");
+    expect(second.status).toBe("FAILED");
+    expect(calle.creates).toHaveLength(1);
+  });
+
+  it("bounds competing failed and completed terminal observations without a stale transition", async () => {
+    const store = new TerminalRaceStore(
+      activeRun({ status: "CALL_STARTING", callId: "call_demo_001" }),
+    );
+    let reads = 0;
+    let releaseReads: (() => void) | undefined;
+    const bothRead = new Promise<void>((resolve) => {
+      releaseReads = resolve;
+    });
+    const calle = new FakeCalle();
+    calle.getCall = async () => {
+      const callNumber = (reads += 1);
+      if (callNumber === 2) releaseReads?.();
+      await bothRead;
+      return callNumber === 1 ? snapshot("completed") : snapshot("failed");
+    };
+
+    const results = await Promise.allSettled([
+      reconcileRun({ store, calle, clock }, "run-001"),
+      reconcileRun({ store, calle, clock }, "run-001"),
+    ]);
+
+    expect(store.current.status).toBe("FAILED");
+    for (const result of results) {
+      if (result.status === "rejected") {
+        expect(result.reason).toBeInstanceOf(AppError);
+        expect(result.reason).not.toMatchObject({
+          code: "RUN_TRANSITION_FORBIDDEN",
+        });
+      }
+    }
   });
 });
