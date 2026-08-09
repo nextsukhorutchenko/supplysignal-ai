@@ -210,6 +210,39 @@ and authenticated records.
   lock-free correctness path, accessor/proxy safety, path confinement, and
   handled-path cleanup remain unchanged.
 
+### Correction A11 (Approved 2026-08-09)
+
+Task 5 uses one atomic, irreversible commit point for immutable version
+publication. This correction supersedes only A9/A10 behavior that treated a
+two-link crash-after-link state as committed. The exact version-file format,
+public APIs, dependencies, and A10 application-private-root trust boundary are
+unchanged.
+
+- A final version inode with `nlink === 2` is always pre-commit and is never
+  authoritative, even when its other link is the matching same-root temporary
+  path. Readers reject it, compare-and-swap cannot publish a descendant, and
+  create cannot overwrite its existing final pathname. Only `nlink === 1` is
+  an authoritative committed version.
+- The writer retains the synchronized temporary handle through hard-link
+  publication and completes all root, handle, path-identity, regular-file,
+  stable-metadata, and two-link checks before closing that handle. It then
+  unlinks the temporary path. Successful temporary unlink is the single commit
+  point because it changes the verified final inode from two links to one.
+- No fallible verification, cleanup, root check, rollback, or other awaited
+  operation follows that successful unlink. A successful create or
+  compare-and-swap returns immediately; A10's relevant successful-write checks
+  are therefore completed before the commit point rather than by a
+  post-publication read or root recheck.
+- Any verification, handle-close, or temporary-unlink failure before commit is
+  a bounded publication failure. The writer may remove the final link it
+  created. If final rollback succeeds, it may clean the temporary path. If
+  final rollback fails, it preserves the temporary link so the surviving final
+  remains at `nlink === 2`, unreadable, and unusable by compare-and-swap.
+- A crash after hard-link creation but before temporary unlink leaves the same
+  fail-closed two-link state. No automatic stale-state recovery is added;
+  operator cleanup inside the application-private root is required. Committed
+  one-link versions remain immutable and are never rolled back.
+
 ## 5. Data flow
 
 The approved primary flow is:

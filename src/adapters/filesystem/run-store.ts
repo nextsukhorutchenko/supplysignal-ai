@@ -148,17 +148,10 @@ export class FileRunStore implements RunStore {
       }
 
       await this.#publish(root, runId, 0, record, "RUN_STORE_ALREADY_EXISTS");
-      const records = await this.#readHistory(root, runId);
-      if (
-        records.length !== 1 ||
-        JSON.stringify(records[0]) !== JSON.stringify(record)
-      ) {
-        fail("RUN_STORE_WRITE_FAILED");
-      }
+      return;
     } catch (error: unknown) {
-      preserveOrFail(error, "RUN_STORE_WRITE_FAILED");
-    } finally {
       await this.#verifyRoot("RUN_STORE_WRITE_FAILED");
+      preserveOrFail(error, "RUN_STORE_WRITE_FAILED");
     }
   }
 
@@ -214,11 +207,10 @@ export class FileRunStore implements RunStore {
         nextRecord,
         "RUN_STORE_CONFLICT",
       );
-      return this.#validateRecord(nextRecord);
+      return nextRecord;
     } catch (error: unknown) {
-      preserveOrFail(error, "RUN_STORE_WRITE_FAILED");
-    } finally {
       await this.#verifyRoot("RUN_STORE_WRITE_FAILED");
+      preserveOrFail(error, "RUN_STORE_WRITE_FAILED");
     }
   }
 
@@ -405,17 +397,31 @@ export class FileRunStore implements RunStore {
         operationError ??= error;
       }
     }
-    if (operationError !== undefined && finalLinked) {
+
+    if (operationError === undefined) {
       try {
-        await unlink(finalPath);
+        await unlink(temporaryPath);
+        return;
       } catch (error: unknown) {
         operationError = error;
       }
     }
-    await unlinkBestEffort(temporaryPath);
-    if (operationError !== undefined) {
-      preserveOrFail(operationError, "RUN_STORE_WRITE_FAILED");
+
+    if (finalLinked) {
+      let finalRollbackSucceeded = false;
+      try {
+        await unlink(finalPath);
+        finalRollbackSucceeded = true;
+      } catch (error: unknown) {
+        operationError = error;
+      }
+      if (finalRollbackSucceeded) {
+        await unlinkBestEffort(temporaryPath);
+      }
+    } else {
+      await unlinkBestEffort(temporaryPath);
     }
+    preserveOrFail(operationError, "RUN_STORE_WRITE_FAILED");
   }
 
   async #scan(
@@ -492,10 +498,7 @@ export class FileRunStore implements RunStore {
       }
       const records: RunRecord[] = [];
       for (const candidate of scan.candidates) {
-        const serialized = await this.#readCandidate(
-          candidate.path,
-          scan.temporaryPaths,
-        );
+        const serialized = await this.#readCandidate(candidate.path);
         const parsed = this.#validateRecord(JSON.parse(serialized) as unknown);
         if (parsed.id !== runId || parsed.version !== candidate.version) {
           fail("RUN_STORE_READ_FAILED");
@@ -508,10 +511,7 @@ export class FileRunStore implements RunStore {
     }
   }
 
-  async #readCandidate(
-    path: string,
-    temporaryPaths: string[],
-  ): Promise<string> {
+  async #readCandidate(path: string): Promise<string> {
     let handle: FileHandle | undefined;
     try {
       const before = await lstat(path, { bigint: true });
@@ -527,7 +527,7 @@ export class FileRunStore implements RunStore {
         afterOpen.isSymbolicLink() ||
         !sameIdentity(before, opened) ||
         !sameIdentity(opened, afterOpen) ||
-        !(await this.#hasSafeLinkCount(opened, temporaryPaths))
+        opened.nlink !== 1n
       ) {
         fail("RUN_STORE_READ_FAILED");
       }
@@ -570,34 +570,5 @@ export class FileRunStore implements RunStore {
       }
     }
     fail("RUN_STORE_READ_FAILED");
-  }
-
-  async #hasSafeLinkCount(
-    opened: BigIntStats,
-    temporaryPaths: string[],
-  ): Promise<boolean> {
-    if (opened.nlink === 1n) {
-      return true;
-    }
-    if (opened.nlink !== 2n) {
-      return false;
-    }
-
-    let matchingTemporaryLinks = 0;
-    for (const temporaryPath of temporaryPaths) {
-      try {
-        const temporary = await lstat(temporaryPath, { bigint: true });
-        if (
-          temporary.isFile() &&
-          !temporary.isSymbolicLink() &&
-          sameIdentity(opened, temporary)
-        ) {
-          matchingTemporaryLinks += 1;
-        }
-      } catch {
-        return false;
-      }
-    }
-    return matchingTemporaryLinks === 1;
   }
 }

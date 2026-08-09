@@ -861,6 +861,51 @@ domain contracts, dependencies, configuration, UI, and integrations.
    pushing, then stop for both independent scoped re-reviews. Task 6 remains
    blocked until both pass without unresolved Critical or Important findings.
 
+#### Correction A11 (Approved 2026-08-09)
+
+This owner-approved Option A supersedes only A9/A10 behavior that treated a
+two-link crash-after-link state as committed. Preserve the immutable
+`<runId>.v<16-digit-version>.json` format, `RunStore` API,
+`FileRunStore({ root, clock })` constructor, dependencies, configuration, and
+the A10 application-private-root trust boundary.
+
+1. Treat every final version with `nlink === 2` as pre-commit and reject it,
+   even when a matching same-root temporary path points to the same inode. Only
+   `nlink === 1` is authoritative. A two-link state cannot be read, used as a
+   compare-and-swap parent, or overwritten by create.
+2. Retain the synchronized temporary handle, create the final hard link,
+   complete all A10 root/handle/path identity, regular-file, stable-metadata,
+   and two-link checks, then close the handle. Only after all those steps pass,
+   unlink the temporary path.
+3. Make successful `unlink(temporaryPath)` the single atomic irreversible
+   commit point. It must be the last fallible action: no verification, cleanup,
+   root check, rollback, or other awaited operation follows it, and the
+   successful create or compare-and-swap returns immediately. Complete the
+   applicable A10 successful-write checks before this point rather than with a
+   post-publication read or root recheck.
+4. Treat verification, handle-close, and temporary-unlink failures as bounded
+   pre-commit publication failures. The writer may remove the final link it
+   created. If that rollback succeeds, temporary cleanup remains best effort.
+   If final rollback fails, preserve the temporary link so the final remains
+   two-link, unreadable, and unusable by compare-and-swap.
+5. Add deterministic RED regressions for direct crash-after-link state, a
+   writer paused between final link and temporary unlink, normal one-link
+   commit and later compare-and-swap, detected substitution plus forced final
+   rollback failure, and temporary-unlink failure with both successful and
+   failed final rollback. Prove the exact focused two-file selection fails on
+   untouched A10 production before implementation and passes afterward.
+6. Do not add automatic stale-state recovery. A crash or rollback failure can
+   leave an incomplete two-link state requiring manual operator cleanup inside
+   the private root. Published one-link versions remain immutable and are
+   never rolled back.
+7. Run focused, coverage, explicitly enumerated affected, and full offline
+   tests plus typecheck, zero-warning lint, format, production build, diff and
+   status checks, and repository secret/build-clean gates when available.
+   Report skipped or unavailable checks truthfully, update the ignored Task 5
+   report and ledger, commit only owned Task 5 files without pushing, and stop
+   for both independent scoped reviews. Task 6 remains blocked until both pass
+   without unresolved Critical or Important findings.
+
 ---
 
 ### Task 6: Implement and contract-test the CALL-E REST boundary

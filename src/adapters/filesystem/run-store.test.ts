@@ -22,6 +22,9 @@ import { FileRunStore } from "./run-store.js";
 const filesystemInterception = vi.hoisted(() => ({
   beforePublicationLink: undefined as
     ((temporaryPath: string, finalPath: string) => Promise<void>) | undefined,
+  afterPublicationLink: undefined as
+    ((temporaryPath: string, finalPath: string) => Promise<void>) | undefined,
+  beforeUnlink: undefined as ((path: string) => Promise<void>) | undefined,
 }));
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -40,7 +43,28 @@ vi.mock("node:fs/promises", async (importOriginal) => {
           finalPath,
         );
       }
-      return actual.link(...args);
+      const result = await actual.link(...args);
+      if (
+        typeof temporaryPath === "string" &&
+        typeof finalPath === "string" &&
+        filesystemInterception.afterPublicationLink !== undefined
+      ) {
+        await filesystemInterception.afterPublicationLink(
+          temporaryPath,
+          finalPath,
+        );
+      }
+      return result;
+    },
+    unlink: async (...args: Parameters<typeof actual.unlink>) => {
+      const [path] = args;
+      if (
+        typeof path === "string" &&
+        filesystemInterception.beforeUnlink !== undefined
+      ) {
+        await filesystemInterception.beforeUnlink(path);
+      }
+      return actual.unlink(...args);
     },
   };
 });
@@ -127,6 +151,8 @@ async function auxiliaryFiles(root: string): Promise<string[]> {
 
 afterEach(async () => {
   filesystemInterception.beforePublicationLink = undefined;
+  filesystemInterception.afterPublicationLink = undefined;
+  filesystemInterception.beforeUnlink = undefined;
   await Promise.all(
     cleanupPaths
       .splice(0)
@@ -304,6 +330,64 @@ describe("FileRunStore", () => {
       root,
     );
     expect(await readdir(root)).not.toContain(VERSION_ZERO);
+  });
+
+  it("preserves two-link fail-closed state when substituted-final rollback fails", async () => {
+    const root = await createRoot();
+    const store = new FileRunStore({ root, clock });
+    const finalPath = join(root, VERSION_ZERO);
+    let temporaryPath: string | undefined;
+    filesystemInterception.beforePublicationLink = async (
+      candidateTemporaryPath,
+      candidateFinalPath,
+    ) => {
+      if (candidateFinalPath === finalPath) {
+        temporaryPath = candidateTemporaryPath;
+        const synchronizedBytes = await readFile(candidateTemporaryPath);
+        await rename(
+          candidateTemporaryPath,
+          `${candidateTemporaryPath}.displaced`,
+        );
+        await writeFile(candidateTemporaryPath, synchronizedBytes);
+      }
+    };
+    filesystemInterception.beforeUnlink = async (path) => {
+      if (path === finalPath) {
+        throw Object.assign(new Error("forced final rollback failure"), {
+          code: "EACCES",
+        });
+      }
+    };
+
+    await expectBoundedFailure(
+      store.create(createRun()),
+      "RUN_STORE_WRITE_FAILED",
+      root,
+    );
+    expect(temporaryPath).toContain("run-001.");
+    const finalStats = await lstat(finalPath, { bigint: true });
+    const temporaryStats = await lstat(temporaryPath as string, {
+      bigint: true,
+    });
+    expect(finalStats.nlink).toBe(2n);
+    expect(temporaryStats.nlink).toBe(2n);
+    expect(finalStats.dev).toBe(temporaryStats.dev);
+    expect(finalStats.ino).toBe(temporaryStats.ino);
+    await expectBoundedFailure(
+      store.read("run-001"),
+      "RUN_STORE_READ_FAILED",
+      root,
+    );
+    await expectBoundedFailure(
+      store.compareAndSwap(
+        "run-001",
+        0,
+        createRun({ version: 1, status: "AWAITING_APPROVAL" }),
+      ),
+      "RUN_STORE_READ_FAILED",
+      root,
+    );
+    expect(await readdir(root)).not.toContain(VERSION_ONE);
   });
 
   it("rejects schema-invalid and accessor-backed records before writing", async () => {
@@ -537,14 +621,98 @@ describe("FileRunStore", () => {
     expect((await store.read("run-001")).version).toBe(0);
   });
 
-  it("treats a crash-after-link version as committed", async () => {
+  it("rejects a two-link crash-after-link version as uncommitted", async () => {
     const root = await createRoot();
     const store = new FileRunStore({ root, clock });
     const temporaryPath = join(root, `run-001.${"b".repeat(32)}.tmp`);
     await writeFile(temporaryPath, JSON.stringify(createRun()), "utf8");
     await link(temporaryPath, join(root, VERSION_ZERO));
 
-    expect((await store.read("run-001")).version).toBe(0);
+    await expectBoundedFailure(
+      store.read("run-001"),
+      "RUN_STORE_READ_FAILED",
+      root,
+    );
+    await expectBoundedFailure(
+      store.compareAndSwap(
+        "run-001",
+        0,
+        createRun({ version: 1, status: "AWAITING_APPROVAL" }),
+      ),
+      "RUN_STORE_READ_FAILED",
+      root,
+    );
+    expect(
+      (await lstat(join(root, VERSION_ZERO), { bigint: true })).nlink,
+    ).toBe(2n);
+    expect(await readdir(root)).not.toContain(VERSION_ONE);
+  });
+
+  it("keeps a linked version unreadable until temporary unlink commits it", async () => {
+    const root = await createRoot();
+    const first = new FileRunStore({ root, clock });
+    const second = new FileRunStore({ root, clock });
+    let observeLink!: () => void;
+    let releaseLink!: () => void;
+    const linkObserved = new Promise<void>((resolve) => {
+      observeLink = resolve;
+    });
+    const linkReleased = new Promise<void>((resolve) => {
+      releaseLink = resolve;
+    });
+    filesystemInterception.afterPublicationLink = async (
+      _temporaryPath,
+      finalPath,
+    ) => {
+      if (finalPath.endsWith(VERSION_ZERO)) {
+        observeLink();
+        await linkReleased;
+      }
+    };
+
+    const publication = first.create(createRun());
+    await linkObserved;
+    try {
+      const blocked = await Promise.allSettled([
+        second.read("run-001"),
+        second.compareAndSwap(
+          "run-001",
+          0,
+          createRun({ version: 1, status: "AWAITING_APPROVAL" }),
+        ),
+      ]);
+      expect(blocked).toEqual([
+        expect.objectContaining({
+          status: "rejected",
+          reason: expect.objectContaining({ message: "RUN_STORE_READ_FAILED" }),
+        }),
+        expect.objectContaining({
+          status: "rejected",
+          reason: expect.objectContaining({ message: "RUN_STORE_READ_FAILED" }),
+        }),
+      ]);
+      expect(
+        (await lstat(join(root, VERSION_ZERO), { bigint: true })).nlink,
+      ).toBe(2n);
+      expect(await readdir(root)).not.toContain(VERSION_ONE);
+    } finally {
+      releaseLink();
+      await Promise.allSettled([publication]);
+    }
+
+    await expect(publication).resolves.toBeUndefined();
+    expect(
+      (await lstat(join(root, VERSION_ZERO), { bigint: true })).nlink,
+    ).toBe(1n);
+    expect((await second.read("run-001")).version).toBe(0);
+    await second.compareAndSwap(
+      "run-001",
+      0,
+      createRun({ version: 1, status: "AWAITING_APPROVAL" }),
+    );
+    expect((await lstat(join(root, VERSION_ONE), { bigint: true })).nlink).toBe(
+      1n,
+    );
   });
 
   it("rejects a symlink candidate without reading its outside target", async () => {
@@ -598,5 +766,81 @@ describe("FileRunStore", () => {
       root,
     );
     expect(await auxiliaryFiles(root)).toEqual([]);
+  });
+
+  it("rejects temporary-unlink failure and removes the rolled-back final", async () => {
+    const root = await createRoot();
+    const store = new FileRunStore({ root, clock });
+    let temporaryPath: string | undefined;
+    let remainingTemporaryFailures = 1;
+    filesystemInterception.beforePublicationLink = async (path) => {
+      temporaryPath = path;
+    };
+    filesystemInterception.beforeUnlink = async (path) => {
+      if (path === temporaryPath && remainingTemporaryFailures > 0) {
+        remainingTemporaryFailures -= 1;
+        throw Object.assign(new Error("forced temporary unlink failure"), {
+          code: "EACCES",
+        });
+      }
+    };
+
+    await expectBoundedFailure(
+      store.create(createRun()),
+      "RUN_STORE_WRITE_FAILED",
+      root,
+    );
+    expect(await readdir(root)).not.toContain(VERSION_ZERO);
+    await expectBoundedFailure(
+      store.read("run-001"),
+      "RUN_STORE_READ_FAILED",
+      root,
+    );
+  });
+
+  it("preserves both links when temporary unlink and final rollback fail", async () => {
+    const root = await createRoot();
+    const store = new FileRunStore({ root, clock });
+    const finalPath = join(root, VERSION_ZERO);
+    let temporaryPath: string | undefined;
+    filesystemInterception.beforePublicationLink = async (path) => {
+      temporaryPath = path;
+    };
+    filesystemInterception.beforeUnlink = async (path) => {
+      if (path === temporaryPath || path === finalPath) {
+        throw Object.assign(new Error("forced unlink failure"), {
+          code: "EACCES",
+        });
+      }
+    };
+
+    await expectBoundedFailure(
+      store.create(createRun()),
+      "RUN_STORE_WRITE_FAILED",
+      root,
+    );
+    expect(temporaryPath).toContain("run-001.");
+    const finalStats = await lstat(finalPath, { bigint: true });
+    const temporaryStats = await lstat(temporaryPath as string, {
+      bigint: true,
+    });
+    expect(finalStats.nlink).toBe(2n);
+    expect(temporaryStats.nlink).toBe(2n);
+    expect(finalStats.ino).toBe(temporaryStats.ino);
+    await expectBoundedFailure(
+      store.read("run-001"),
+      "RUN_STORE_READ_FAILED",
+      root,
+    );
+    await expectBoundedFailure(
+      store.compareAndSwap(
+        "run-001",
+        0,
+        createRun({ version: 1, status: "AWAITING_APPROVAL" }),
+      ),
+      "RUN_STORE_READ_FAILED",
+      root,
+    );
+    expect(await readdir(root)).not.toContain(VERSION_ONE);
   });
 });
