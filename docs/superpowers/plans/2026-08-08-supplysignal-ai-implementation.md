@@ -815,6 +815,52 @@ lock-file implementation details. Keep the existing `RunStore` API and
    secret/build-clean gates when available. Record exact evidence and stop for
    independent specification and quality reviews before Task 6.
 
+#### Correction A10 (Approved 2026-08-09)
+
+This correction supersedes only the affected Task 5 persistence internals and
+tests. Preserve the `RunStore` API, `FileRunStore({ root, clock })` constructor,
+domain contracts, dependencies, configuration, UI, and integrations.
+
+1. Treat the configured root and all parent components as application-private.
+   They must not be concurrently writable or relinkable by untrusted processes.
+   Owner-only filesystem permissions or ACLs remain an operator responsibility.
+   Do not claim integrity against an actor with concurrent write or relink
+   access inside that trusted boundary. Malicious replace-and-restore ABA would
+   require separately approved external key management and authenticated
+   records and is outside this correction.
+2. Pin the first established root's canonical path and stable device/inode
+   identity. Before and after create, read, and compare-and-swap, and around
+   final publication, `lstat` the configured root, reject
+   symlink/reparse/non-directory state, resolve its real path, and require the
+   canonical path and identity to match the pin. Fail bounded on persistent
+   replacement.
+3. Before create publishes version zero, perform the existing bounded streaming
+   scan and require zero candidates for that run, including exact future
+   versions and malformed `.v` candidates. After publication, repeat the
+   bounded strict read and require exactly one valid version-zero record equal
+   to the submitted canonical record.
+4. Keep the exclusive temporary `FileHandle` open through publication. After
+   write and sync, require handle and pre-`lstat` path identity, regular-file
+   state, stable size/mtime/ctime, and link count one. After atomic create-only
+   hard-link publication, require the still-open handle plus temporary and final
+   path checks to share the same regular-file identity and stable post-link
+   size/mtime/ctime with link count two. Only then close the handle and clean
+   the temporary path; any mismatch fails bounded and is never success.
+5. Preserve A9's immutable exact filenames, 1,024-candidate history bound,
+   strict record validation, absence of lock correctness, bounded errors,
+   accessor/proxy safety, path confinement, and handled-path cleanup.
+6. Add deterministic RED regressions for persistent root replacement, a valid
+   preplanted version one before create, and temporary-path substitution after
+   sync and before link. Retain normal create and compare-and-swap regressions.
+   A minimal adapter-internal filesystem seam or test-only hook is allowed only
+   to coordinate these tests and must not change public or production behavior.
+7. Run focused RED/GREEN evidence, coverage, affected and full offline suites,
+   typecheck, zero-warning lint, format, production build, diff checks, and
+   repository secret/build-clean gates when available. Report platform skips or
+   unavailable checks truthfully. Create one separate corrective commit without
+   pushing, then stop for both independent scoped re-reviews. Task 6 remains
+   blocked until both pass without unresolved Critical or Important findings.
+
 ---
 
 ### Task 6: Implement and contract-test the CALL-E REST boundary

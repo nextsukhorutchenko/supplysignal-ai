@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -12,11 +13,37 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { Clock } from "../../application/ports.js";
 import type { RunRecord } from "../../domain/run.js";
 import { FileRunStore } from "./run-store.js";
+
+const filesystemInterception = vi.hoisted(() => ({
+  beforePublicationLink: undefined as
+    ((temporaryPath: string, finalPath: string) => Promise<void>) | undefined,
+}));
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    link: async (...args: Parameters<typeof actual.link>) => {
+      const [temporaryPath, finalPath] = args;
+      if (
+        typeof temporaryPath === "string" &&
+        typeof finalPath === "string" &&
+        filesystemInterception.beforePublicationLink !== undefined
+      ) {
+        await filesystemInterception.beforePublicationLink(
+          temporaryPath,
+          finalPath,
+        );
+      }
+      return actual.link(...args);
+    },
+  };
+});
 
 const fixedNow = "2026-08-08T12:00:00.000Z";
 const privatePhone = "+12025550123";
@@ -99,6 +126,7 @@ async function auxiliaryFiles(root: string): Promise<string[]> {
 }
 
 afterEach(async () => {
+  filesystemInterception.beforePublicationLink = undefined;
   await Promise.all(
     cleanupPaths
       .splice(0)
@@ -181,6 +209,94 @@ describe("FileRunStore", () => {
       "Northstar Components",
     );
     expect(await readdir(root)).toEqual([VERSION_ZERO]);
+  });
+
+  it.each([
+    [
+      "create",
+      (store: FileRunStore) =>
+        store.create(createRun({ id: "run-after-replacement" })),
+    ],
+    ["read", (store: FileRunStore) => store.read("run-001")],
+    [
+      "compare-and-swap",
+      (store: FileRunStore) =>
+        store.compareAndSwap(
+          "run-001",
+          0,
+          createRun({ version: 1, status: "AWAITING_APPROVAL" }),
+        ),
+    ],
+  ] as const)(
+    "rejects persistent root replacement before %s",
+    async (_operationName, operation) => {
+      const root = await createRoot();
+      const displacedRoot = `${root}-displaced`;
+      cleanupPaths.push(displacedRoot);
+      const store = new FileRunStore({ root, clock });
+      await store.create(createRun());
+      await rename(root, displacedRoot);
+      await mkdir(root);
+
+      await expectBoundedFailure(
+        operation(store),
+        "RUN_STORE_INVALID_ROOT",
+        root,
+      );
+      expect(await readdir(root)).toEqual([]);
+      expect(await readdir(displacedRoot)).toEqual([VERSION_ZERO]);
+    },
+  );
+
+  it("rejects a preplanted valid future version before create", async () => {
+    const root = await createRoot();
+    await writeFile(
+      join(root, VERSION_ONE),
+      JSON.stringify(createRun({ version: 1 })),
+      "utf8",
+    );
+    const store = new FileRunStore({ root, clock });
+
+    await expectBoundedFailure(
+      store.create(createRun()),
+      "RUN_STORE_ALREADY_EXISTS",
+      root,
+    );
+    expect(await readdir(root)).toEqual([VERSION_ONE]);
+  });
+
+  it("rejects temporary-path substitution after fsync", async () => {
+    const root = await createRoot();
+    const store = new FileRunStore({ root, clock });
+    let synchronizedTemporaryPath: string | undefined;
+    filesystemInterception.beforePublicationLink = async (
+      temporaryPath,
+      finalPath,
+    ) => {
+      if (finalPath.endsWith(VERSION_ZERO)) {
+        synchronizedTemporaryPath = temporaryPath;
+        await rename(temporaryPath, `${temporaryPath}.displaced`);
+        await writeFile(
+          temporaryPath,
+          JSON.stringify(
+            createRun({
+              order: {
+                ...createRun().order,
+                supplierName: "Substituted supplier",
+              },
+            }),
+          ),
+          "utf8",
+        );
+      }
+    };
+
+    await expectBoundedFailure(
+      store.create(createRun()),
+      "RUN_STORE_WRITE_FAILED",
+      root,
+    );
+    expect(synchronizedTemporaryPath).toContain("run-001.");
   });
 
   it("rejects schema-invalid and accessor-backed records before writing", async () => {

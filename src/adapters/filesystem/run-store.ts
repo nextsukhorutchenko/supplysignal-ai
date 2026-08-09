@@ -42,6 +42,11 @@ type ScanResult = {
   temporaryPaths: string[];
 };
 
+type RootSnapshot = {
+  canonicalPath: string;
+  stats: BigIntStats;
+};
+
 class RunStoreFailure extends Error {
   constructor(readonly code: RunStoreFailureCode) {
     super(code);
@@ -85,32 +90,17 @@ async function unlinkBestEffort(path: string): Promise<void> {
   }
 }
 
-async function writeExclusiveSynced(path: string, data: string): Promise<void> {
-  let handle: FileHandle | undefined;
-  let operationError: unknown;
-  try {
-    handle = await open(path, "wx", 0o600);
-    await handle.writeFile(data, "utf8");
-    await handle.sync();
-  } catch (error: unknown) {
-    operationError = error;
-  }
-
-  if (handle !== undefined) {
-    try {
-      await handle.close();
-    } catch (error: unknown) {
-      operationError ??= error;
-    }
-  }
-
-  if (operationError !== undefined) {
-    throw operationError;
-  }
-}
-
 function sameIdentity(first: BigIntStats, second: BigIntStats): boolean {
   return first.dev === second.dev && first.ino === second.ino;
+}
+
+function sameStableMetadata(first: BigIntStats, second: BigIntStats): boolean {
+  return (
+    sameIdentity(first, second) &&
+    first.size === second.size &&
+    first.mtimeNs === second.mtimeNs &&
+    first.ctimeNs === second.ctimeNs
+  );
 }
 
 function unchangedFile(first: BigIntStats, second: BigIntStats): boolean {
@@ -129,7 +119,7 @@ function escapeRegExp(value: string): string {
 
 export class FileRunStore implements RunStore {
   readonly #configuredRoot: string;
-  #canonicalRoot: string | undefined;
+  #rootSnapshot: RootSnapshot | undefined;
 
   constructor(options: { root: string; clock: Clock }) {
     if (
@@ -151,7 +141,25 @@ export class FileRunStore implements RunStore {
     }
 
     const root = await this.#ensureRoot("RUN_STORE_WRITE_FAILED");
-    await this.#publish(root, runId, 0, record, "RUN_STORE_ALREADY_EXISTS");
+    try {
+      const existing = await this.#scan(root, runId, false);
+      if (existing.candidates.length !== 0) {
+        fail("RUN_STORE_ALREADY_EXISTS");
+      }
+
+      await this.#publish(root, runId, 0, record, "RUN_STORE_ALREADY_EXISTS");
+      const records = await this.#readHistory(root, runId);
+      if (
+        records.length !== 1 ||
+        JSON.stringify(records[0]) !== JSON.stringify(record)
+      ) {
+        fail("RUN_STORE_WRITE_FAILED");
+      }
+    } catch (error: unknown) {
+      preserveOrFail(error, "RUN_STORE_WRITE_FAILED");
+    } finally {
+      await this.#verifyRoot("RUN_STORE_WRITE_FAILED");
+    }
   }
 
   async read(runId: string): Promise<RunRecord> {
@@ -166,6 +174,8 @@ export class FileRunStore implements RunStore {
       return this.#validateRecord(latest);
     } catch (error: unknown) {
       preserveOrFail(error, "RUN_STORE_READ_FAILED");
+    } finally {
+      await this.#verifyRoot("RUN_STORE_READ_FAILED");
     }
   }
 
@@ -207,6 +217,8 @@ export class FileRunStore implements RunStore {
       return this.#validateRecord(nextRecord);
     } catch (error: unknown) {
       preserveOrFail(error, "RUN_STORE_WRITE_FAILED");
+    } finally {
+      await this.#verifyRoot("RUN_STORE_WRITE_FAILED");
     }
   }
 
@@ -246,28 +258,60 @@ export class FileRunStore implements RunStore {
     failureCode: "RUN_STORE_READ_FAILED" | "RUN_STORE_WRITE_FAILED",
   ): Promise<string> {
     try {
-      await mkdir(this.#configuredRoot, { recursive: true });
-      const rootBefore = await lstat(this.#configuredRoot, { bigint: true });
-      if (!rootBefore.isDirectory() || rootBefore.isSymbolicLink()) {
-        fail("RUN_STORE_INVALID_ROOT");
+      if (this.#rootSnapshot === undefined) {
+        await mkdir(this.#configuredRoot, { recursive: true });
       }
-      const canonical = await realpath(this.#configuredRoot);
-      const rootAfter = await lstat(this.#configuredRoot, { bigint: true });
-      if (
-        !rootAfter.isDirectory() ||
-        rootAfter.isSymbolicLink() ||
-        !sameIdentity(rootBefore, rootAfter)
+      const snapshot = await this.#readRootSnapshot();
+      if (this.#rootSnapshot === undefined) {
+        this.#rootSnapshot = snapshot;
+      } else if (
+        this.#rootSnapshot.canonicalPath !== snapshot.canonicalPath ||
+        !sameIdentity(this.#rootSnapshot.stats, snapshot.stats)
       ) {
         fail("RUN_STORE_INVALID_ROOT");
       }
+      return snapshot.canonicalPath;
+    } catch (error: unknown) {
+      if (error instanceof RunStoreFailure) {
+        throw error;
+      }
+      fail(failureCode);
+    }
+  }
+
+  async #readRootSnapshot(): Promise<RootSnapshot> {
+    const before = await lstat(this.#configuredRoot, { bigint: true });
+    if (!before.isDirectory() || before.isSymbolicLink()) {
+      fail("RUN_STORE_INVALID_ROOT");
+    }
+    const canonicalPath = await realpath(this.#configuredRoot);
+    const after = await lstat(this.#configuredRoot, { bigint: true });
+    if (
+      !after.isDirectory() ||
+      after.isSymbolicLink() ||
+      !sameIdentity(before, after)
+    ) {
+      fail("RUN_STORE_INVALID_ROOT");
+    }
+    return { canonicalPath, stats: after };
+  }
+
+  async #verifyRoot(
+    failureCode: "RUN_STORE_READ_FAILED" | "RUN_STORE_WRITE_FAILED",
+  ): Promise<string> {
+    try {
+      const pinned = this.#rootSnapshot;
+      if (pinned === undefined) {
+        fail("RUN_STORE_INVALID_ROOT");
+      }
+      const current = await this.#readRootSnapshot();
       if (
-        this.#canonicalRoot !== undefined &&
-        this.#canonicalRoot !== canonical
+        pinned.canonicalPath !== current.canonicalPath ||
+        !sameIdentity(pinned.stats, current.stats)
       ) {
         fail("RUN_STORE_INVALID_ROOT");
       }
-      this.#canonicalRoot = canonical;
-      return canonical;
+      return current.canonicalPath;
     } catch (error: unknown) {
       if (error instanceof RunStoreFailure) {
         throw error;
@@ -292,8 +336,30 @@ export class FileRunStore implements RunStore {
       `${runId}.${randomToken()}.tmp`,
     );
 
+    let handle: FileHandle | undefined;
+    let operationError: unknown;
     try {
-      await writeExclusiveSynced(temporaryPath, JSON.stringify(record));
+      const serialized = JSON.stringify(record);
+      handle = await open(temporaryPath, "wx", 0o600);
+      await handle.writeFile(serialized, "utf8");
+      await handle.sync();
+      const opened = await handle.stat({ bigint: true });
+      const beforePath = await lstat(temporaryPath, { bigint: true });
+      if (
+        !opened.isFile() ||
+        !beforePath.isFile() ||
+        beforePath.isSymbolicLink() ||
+        opened.nlink !== 1n ||
+        beforePath.nlink !== 1n ||
+        opened.size !== BigInt(Buffer.byteLength(serialized, "utf8")) ||
+        !sameStableMetadata(opened, beforePath)
+      ) {
+        fail("RUN_STORE_WRITE_FAILED");
+      }
+
+      if ((await this.#verifyRoot("RUN_STORE_WRITE_FAILED")) !== root) {
+        fail("RUN_STORE_INVALID_ROOT");
+      }
       try {
         await link(temporaryPath, finalPath);
       } catch (error: unknown) {
@@ -302,14 +368,52 @@ export class FileRunStore implements RunStore {
         }
         throw error;
       }
+      if ((await this.#verifyRoot("RUN_STORE_WRITE_FAILED")) !== root) {
+        fail("RUN_STORE_INVALID_ROOT");
+      }
+
+      const afterLink = await handle.stat({ bigint: true });
+      const afterTemporaryPath = await lstat(temporaryPath, { bigint: true });
+      const afterFinalPath = await lstat(finalPath, { bigint: true });
+      if (
+        !afterLink.isFile() ||
+        !afterTemporaryPath.isFile() ||
+        afterTemporaryPath.isSymbolicLink() ||
+        !afterFinalPath.isFile() ||
+        afterFinalPath.isSymbolicLink() ||
+        afterLink.nlink !== 2n ||
+        afterTemporaryPath.nlink !== 2n ||
+        afterFinalPath.nlink !== 2n ||
+        !sameIdentity(opened, afterLink) ||
+        opened.size !== afterLink.size ||
+        opened.mtimeNs !== afterLink.mtimeNs ||
+        !sameStableMetadata(afterLink, afterTemporaryPath) ||
+        !sameStableMetadata(afterLink, afterFinalPath)
+      ) {
+        fail("RUN_STORE_WRITE_FAILED");
+      }
     } catch (error: unknown) {
-      preserveOrFail(error, "RUN_STORE_WRITE_FAILED");
-    } finally {
-      await unlinkBestEffort(temporaryPath);
+      operationError = error;
+    }
+
+    if (handle !== undefined) {
+      try {
+        await handle.close();
+      } catch (error: unknown) {
+        operationError ??= error;
+      }
+    }
+    await unlinkBestEffort(temporaryPath);
+    if (operationError !== undefined) {
+      preserveOrFail(operationError, "RUN_STORE_WRITE_FAILED");
     }
   }
 
-  async #scan(root: string, runId: string): Promise<ScanResult> {
+  async #scan(
+    root: string,
+    runId: string,
+    requireContiguousHistory = true,
+  ): Promise<ScanResult> {
     const escapedId = escapeRegExp(runId);
     const versionPattern = new RegExp(
       `^${escapedId}\\.v(\\d{${VERSION_DIGITS}})\\.json$`,
@@ -356,14 +460,16 @@ export class FileRunStore implements RunStore {
     }
 
     candidates.sort((first, second) => first.version - second.version);
-    for (let index = 0; index < candidates.length; index += 1) {
-      const candidate = candidates[index];
-      if (
-        candidate === undefined ||
-        !Number.isSafeInteger(candidate.version) ||
-        candidate.version !== index
-      ) {
-        fail("RUN_STORE_READ_FAILED");
+    if (requireContiguousHistory) {
+      for (let index = 0; index < candidates.length; index += 1) {
+        const candidate = candidates[index];
+        if (
+          candidate === undefined ||
+          !Number.isSafeInteger(candidate.version) ||
+          candidate.version !== index
+        ) {
+          fail("RUN_STORE_READ_FAILED");
+        }
       }
     }
     return { candidates, temporaryPaths };

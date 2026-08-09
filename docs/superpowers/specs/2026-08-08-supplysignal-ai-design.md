@@ -177,6 +177,39 @@ approved behavior remain unchanged.
   link count remain valid. Symlink, reparse-point, path-swap, and outside-root
   hard-link candidates fail closed.
 
+### Correction A10 (Approved 2026-08-09)
+
+Task 5 treats the configured persistence root and every parent component as
+application-private; they must not be concurrently writable or relinkable by
+untrusted processes. Owner-only filesystem permissions or ACLs are an operator
+responsibility outside `FileRunStore`. This correction does not claim integrity
+against an actor that already has concurrent write or relink access inside that
+trusted boundary; defending against such an actor, including malicious
+replace-and-restore ABA, requires separately approved external key management
+and authenticated records.
+
+- On first establishment the store pins the root's canonical path and stable
+  device/inode identity. Before and after every create, read, and
+  compare-and-swap operation, and around final publication, it `lstat`s the
+  configured root, rejects symlink/reparse/non-directory state, resolves the
+  real path, and requires the canonical path and identity to match the pin. A
+  persistent root replacement fails with a bounded store error.
+- Before create publishes version zero, the bounded streaming history scan
+  requires no candidate for that run, including exact future versions and
+  malformed `.v` candidates. After publication the store performs the same
+  bounded strict read and requires exactly one valid version-zero record equal
+  to the submitted canonical record.
+- The exclusive temporary file handle remains open after the complete write and
+  sync. Pre-publication handle/path checks require one regular-file identity,
+  stable size/mtime/ctime, and link count one. Atomic create-only hard-link
+  publication is followed by handle and both-path checks requiring the same
+  regular-file identity, stable post-link size/mtime/ctime, and link count two
+  before the handle is closed and the temporary path is cleaned. Any mismatch
+  fails bounded and is never reported as success.
+- A9's immutable exact version files, 1,024-candidate bound, strict validation,
+  lock-free correctness path, accessor/proxy safety, path confinement, and
+  handled-path cleanup remain unchanged.
+
 ## 5. Data flow
 
 The approved primary flow is:
