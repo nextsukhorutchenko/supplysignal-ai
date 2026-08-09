@@ -819,6 +819,12 @@ lock-file implementation details. Keep the existing `RunStore` API and
 
 ### Task 6: Implement and contract-test the CALL-E REST boundary
 
+**Dated platform observation:** CALL-E support stated on 2026-08-09 that API-
+and SDK-created calls may not appear in Dashboard `Recents` or `Search calls`.
+The adapter must never use Dashboard visibility as reconciliation evidence or as
+a reason to redial. See
+`docs/research/2026-08-09-call-e-dashboard-observation.md`.
+
 **Files:**
 - Create: `src/adapters/calle/request.ts`
 - Create: `src/adapters/calle/request.test.ts`
@@ -1112,6 +1118,12 @@ Continue only if all three provider outcomes match physical observation and no d
 - [ ] **Step 11: Write and commit the sanitized preflight evidence**
 
 Record date, application commit, OpenAPI version, scenario outcomes, call-ID hashes, timings, observed-versus-reported comparison, and the explicit pass/fail decision. Exclude the phone, participant identity, raw transcript, and consent evidence.
+
+Also record whether the API-created call appeared in Dashboard history, but
+treat that field as informational only. A missing Dashboard entry must never
+justify a second call. Record ringing-without-audio as a separate discrepancy
+and stop expansion until it is understood or explicitly accepted by an
+owner-approved amendment.
 
 ```bash
 git add docs/verification/call-e-preflight.md
