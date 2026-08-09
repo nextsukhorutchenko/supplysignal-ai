@@ -79,7 +79,7 @@ describe("mapCallResource", () => {
           id: "evidence_001",
           excerpt:
             "Three hundred fifty are ready and one hundred fifty are delayed.",
-          turnIndexes: [1],
+          turnIndexes: [],
         },
       ],
     });
@@ -96,14 +96,28 @@ describe("mapCallResource", () => {
     );
   });
 
-  it("retains an empty transcript as bounded evidence without inventing turns", async () => {
+  it("retains an empty nested transcript without inventing turns", async () => {
     const completed = (await fixture("completed-valid.json")) as Record<
       string,
       unknown
     >;
+    const completedRecipient = (
+      completed.recipients as Record<string, unknown>[]
+    )[0] as Record<string, unknown>;
+    const completedAttempt = (
+      completedRecipient.attempts as Record<string, unknown>[]
+    )[0] as Record<string, unknown>;
 
     expect(
-      mapCallResource({ ...completed, transcript: [] }).transcript,
+      mapCallResource({
+        ...completed,
+        recipients: [
+          {
+            ...completedRecipient,
+            attempts: [{ ...completedAttempt, transcript_turns: [] }],
+          },
+        ],
+      }).transcript,
     ).toEqual([]);
   });
 
@@ -112,34 +126,103 @@ describe("mapCallResource", () => {
       string,
       unknown
     >;
+    const completedRecipient = (
+      completed.recipients as Record<string, unknown>[]
+    )[0] as Record<string, unknown>;
+    const completedAttempt = (
+      completedRecipient.attempts as Record<string, unknown>[]
+    )[0] as Record<string, unknown>;
 
     expect(() =>
       mapCallResource({
         ...completed,
-        transcript: Array.from({ length: 121 }, () => ({
-          speaker: "user",
-          text: "bounded",
-        })),
+        recipients: [
+          {
+            ...completedRecipient,
+            attempts: [
+              {
+                ...completedAttempt,
+                transcript_turns: Array.from({ length: 121 }, () => ({
+                  offset_seconds: 0,
+                  speaker: "user",
+                  text: "bounded",
+                })),
+              },
+            ],
+          },
+        ],
       }),
     ).toThrow("PROVIDER_RESULT_INVALID");
     expect(() =>
       mapCallResource({
         ...completed,
-        recipient_result: {
-          ...(completed.recipient_result as object),
-          delay_reason: "x".repeat(501),
-        },
+        recipients: [
+          {
+            ...completedRecipient,
+            structured_result: {
+              ...(completedRecipient.structured_result as object),
+              delay_reason: "x".repeat(501),
+            },
+          },
+        ],
       }),
     ).toThrow("PROVIDER_RESULT_INVALID");
   });
 
+  it("preserves only truthful no-answer sentinels and no transcript", async () => {
+    const completed = (await fixture("completed-valid.json")) as Record<
+      string,
+      unknown
+    >;
+    const completedRecipient = (
+      completed.recipients as Record<string, unknown>[]
+    )[0] as Record<string, unknown>;
+    const snapshot = mapCallResource({
+      ...completed,
+      task_completed: false,
+      completion_confidence: null,
+      evidence: [],
+      recipients: [
+        {
+          ...completedRecipient,
+          attempts: [],
+          structured_result: {
+            contact_outcome: "no_answer",
+            confirmed_quantity: 0,
+            available_quantity: 0,
+            delayed_quantity: 0,
+            promised_delivery_date: "unknown",
+            delay_reason: "unknown",
+            follow_up_required: "unknown",
+            unable_to_fulfill: "unknown",
+          },
+        },
+      ],
+    });
+
+    expect(snapshot).toMatchObject({
+      taskCompleted: false,
+      transcript: [],
+      structuredResult: {
+        contactOutcome: "no_answer",
+        confirmedQuantity: 0,
+        availableQuantity: 0,
+        delayedQuantity: 0,
+        promisedDeliveryDate: "unknown",
+        delayReason: "unknown",
+        followUpRequired: "unknown",
+        unableToFulfill: "unknown",
+      },
+    });
+  });
+
   it("returns only a bounded typed error for malformed provider data", () => {
-    const fullPhone = "+12025550123";
+    const fullPhone = ["+1", "202", "555", "0123"].join("");
     const providerMessage = `${fullPhone} C:\\private\\provider raw transcript`;
 
     try {
       mapCallResource({
-        call_id: "call_demo_unsafe",
+        id: "call_demo_unsafe",
         status: "completed",
         provider_message: providerMessage,
       });

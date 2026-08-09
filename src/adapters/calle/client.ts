@@ -5,7 +5,7 @@ import type {
   CreateSupplierCall,
 } from "../../application/ports.js";
 import { AppError, type AppErrorCode } from "../../domain/errors.js";
-import { buildCreateCallRequest } from "./request.js";
+import { prepareCreateCallRequest } from "./request.js";
 import { mapCallResource, mapEventsPage } from "./mapper.js";
 import { MAX_CALLE_RESPONSE_BYTES } from "./schemas.js";
 
@@ -14,8 +14,9 @@ const GET_RETRY_DELAYS = [500, 1_000] as const;
 const MAX_API_KEY_LENGTH = 4_000;
 const MAX_CALL_ID_LENGTH = 128;
 const MAX_CURSOR_LENGTH = 256;
-const MAX_IDEMPOTENCY_KEY_LENGTH = 256;
+const MAX_IDEMPOTENCY_KEY_LENGTH = 255;
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f-\u009f]/;
+const CALL_ID_PATTERN = /^call_[A-Za-z0-9_-]+$/;
 const TRANSIENT_GET_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
 
 export type CalleErrorKind =
@@ -70,22 +71,49 @@ function requireBoundedHeaderValue(value: string, maximumLength: number): void {
   if (
     value.length === 0 ||
     value.length > maximumLength ||
-    CONTROL_CHARACTER_PATTERN.test(value)
+    CONTROL_CHARACTER_PATTERN.test(value) ||
+    !hasOnlyPairedSurrogates(value)
   ) {
     throw error("CALL_CREATION_FAILED", "creation_rejected");
   }
 }
 
-function encodePathIdentifier(value: string, maximumLength: number): string {
+function hasOnlyPairedSurrogates(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!Number.isInteger(next) || next < 0xdc00 || next > 0xdfff) {
+        return false;
+      }
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function encodePathIdentifier(
+  value: string,
+  maximumLength: number,
+  pattern?: RegExp,
+): string {
   if (
     value.trim() !== value ||
     value.length === 0 ||
     value.length > maximumLength ||
-    CONTROL_CHARACTER_PATTERN.test(value)
+    CONTROL_CHARACTER_PATTERN.test(value) ||
+    !hasOnlyPairedSurrogates(value) ||
+    (pattern !== undefined && !pattern.test(value))
   ) {
     throw error("CALL_NOT_READY", "call_not_ready");
   }
-  return encodeURIComponent(value);
+  try {
+    return encodeURIComponent(value);
+  } catch {
+    throw error("CALL_NOT_READY", "call_not_ready");
+  }
 }
 
 async function defaultSleep(milliseconds: number): Promise<void> {
@@ -171,11 +199,15 @@ export class CalleClient implements CalleGateway {
   }
 
   async createCall(input: CreateSupplierCall): Promise<CalleCallSnapshot> {
-    requireBoundedHeaderValue(input.idempotencyKey, MAX_IDEMPOTENCY_KEY_LENGTH);
-
+    let prepared: ReturnType<typeof prepareCreateCallRequest>;
     let body: string;
     try {
-      body = JSON.stringify(buildCreateCallRequest(input));
+      prepared = prepareCreateCallRequest(input);
+      requireBoundedHeaderValue(
+        prepared.canonicalInput.idempotencyKey,
+        MAX_IDEMPOTENCY_KEY_LENGTH,
+      );
+      body = JSON.stringify(prepared.request);
     } catch {
       throw error("CALL_CREATION_FAILED", "creation_rejected");
     }
@@ -187,9 +219,10 @@ export class CalleClient implements CalleGateway {
         headers: {
           authorization: `Bearer ${this.apiKey}`,
           "content-type": "application/json",
-          "idempotency-key": input.idempotencyKey,
+          "idempotency-key": prepared.canonicalInput.idempotencyKey,
         },
         body,
+        redirect: "error",
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MILLISECONDS),
       });
     } catch {
@@ -199,7 +232,10 @@ export class CalleClient implements CalleGateway {
     if (response.status === 409) {
       throw error("CALL_CREATION_FAILED", "idempotency_conflict");
     }
-    if (!response.ok) {
+    if (response.status !== 201) {
+      if (response.status >= 200 && response.status < 300) {
+        throw error("CALL_OUTCOME_PENDING", "ambiguous_create");
+      }
       if (
         response.status >= 500 ||
         TRANSIENT_GET_STATUSES.has(response.status)
@@ -217,7 +253,11 @@ export class CalleClient implements CalleGateway {
   }
 
   async getCall(callId: string): Promise<CalleCallSnapshot> {
-    const encodedCallId = encodePathIdentifier(callId, MAX_CALL_ID_LENGTH);
+    const encodedCallId = encodePathIdentifier(
+      callId,
+      MAX_CALL_ID_LENGTH,
+      CALL_ID_PATTERN,
+    );
     return this.readGet(
       `${this.baseUrl}/v1/calls/${encodedCallId}`,
       mapCallResource,
@@ -225,7 +265,11 @@ export class CalleClient implements CalleGateway {
   }
 
   async listEvents(callId: string, cursor?: string): Promise<CalleEventPage> {
-    const encodedCallId = encodePathIdentifier(callId, MAX_CALL_ID_LENGTH);
+    const encodedCallId = encodePathIdentifier(
+      callId,
+      MAX_CALL_ID_LENGTH,
+      CALL_ID_PATTERN,
+    );
     const encodedCursor =
       cursor === undefined
         ? ""
@@ -246,6 +290,7 @@ export class CalleClient implements CalleGateway {
         response = await this.fetchImpl(url, {
           method: "GET",
           headers: { authorization: `Bearer ${this.apiKey}` },
+          redirect: "error",
           signal: AbortSignal.timeout(REQUEST_TIMEOUT_MILLISECONDS),
         });
       } catch {
@@ -264,7 +309,10 @@ export class CalleClient implements CalleGateway {
         throw error("CALL_OUTCOME_PENDING", "read_failed");
       }
 
-      if (!response.ok) {
+      if (response.status !== 200) {
+        if (response.status >= 200 && response.status < 300) {
+          throw error("PROVIDER_RESULT_INVALID", "provider_result_invalid");
+        }
         throw error("CALL_NOT_READY", "call_not_ready");
       }
 

@@ -1,6 +1,9 @@
+import { z } from "zod";
+
 import type { CreateSupplierCall } from "../../application/ports.js";
 import { callRecipientSchema } from "../../domain/call-recipient.js";
 import { AppError } from "../../domain/errors.js";
+import { withPlainDataBoundary } from "../../domain/plain-data.js";
 import { purchaseOrderSchema } from "../../domain/purchase-order.js";
 
 export const CALLE_OPENAPI_VERSION = "0.6.0" as const;
@@ -8,6 +11,32 @@ export const CALLE_OPENAPI_VERSION = "0.6.0" as const;
 const MAX_CALL_TASK_LENGTH = 4_000;
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f-\u009f]/;
+
+function isEncodeSafe(value: string): boolean {
+  try {
+    encodeURIComponent(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const createSupplierCallSchema: z.ZodType<CreateSupplierCall> =
+  withPlainDataBoundary(
+    z.strictObject({
+      runId: z.string().regex(SAFE_RUN_ID_PATTERN),
+      idempotencyKey: z
+        .string()
+        .min(1)
+        .max(255)
+        .refine(
+          (value) =>
+            !CONTROL_CHARACTER_PATTERN.test(value) && isEncodeSafe(value),
+        ),
+      order: purchaseOrderSchema,
+      recipient: callRecipientSchema,
+    }),
+  );
 
 export const recipientResultSchema = {
   type: "object",
@@ -83,26 +112,15 @@ function requireSafeInlineText(value: string): void {
   }
 }
 
-export function buildCreateCallRequest(input: CreateSupplierCall) {
-  const order = purchaseOrderSchema.safeParse(input.order);
-  const recipient = callRecipientSchema.safeParse(input.recipient);
-
-  if (
-    !order.success ||
-    !recipient.success ||
-    !SAFE_RUN_ID_PATTERN.test(input.runId)
-  ) {
-    throw creationFailure();
-  }
-
-  requireSafeInlineText(order.data.supplierName);
-  requireSafeInlineText(order.data.purchaseOrderRef);
+function buildCanonicalCreateCallRequest(input: CreateSupplierCall) {
+  requireSafeInlineText(input.order.supplierName);
+  requireSafeInlineText(input.order.purchaseOrderRef);
 
   const task = [
     "You are SupplySignal AI, an automated calling agent.",
     "Immediately disclose that this is an AI-assisted fictional supplier demo and that the call may be recorded for an approved hackathon demonstration.",
-    `Ask about fictional purchase order ${order.data.purchaseOrderRef} from ${order.data.supplierName}.`,
-    `Confirm the quantity expected (${order.data.expectedQuantity}), quantity ready now, quantity delayed, and promised delivery date relative to ${order.data.requiredDeliveryDate}.`,
+    `Ask about fictional purchase order ${input.order.purchaseOrderRef} from ${input.order.supplierName}.`,
+    `Confirm the quantity expected (${input.order.expectedQuantity}), quantity ready now, quantity delayed, and promised delivery date relative to ${input.order.requiredDeliveryDate}.`,
     "Ask for the delay reason, whether human follow-up is required, and whether the supplier is unable to fulfill the order.",
     "If the recipient declines, stop politely and do not invent answers. If nobody answers, do not infer supplier facts.",
   ].join("\n");
@@ -115,7 +133,7 @@ export function buildCreateCallRequest(input: CreateSupplierCall) {
     task,
     recipients: [
       {
-        phones: [recipient.data.phoneE164],
+        phones: [input.recipient.phoneE164],
         region: "US",
         locale: "en-US",
       },
@@ -123,4 +141,22 @@ export function buildCreateCallRequest(input: CreateSupplierCall) {
     recipient_result_schema: recipientResultSchema,
     metadata: { workflow_run_id: input.runId },
   } as const;
+}
+
+export function prepareCreateCallRequest(input: unknown): {
+  readonly canonicalInput: CreateSupplierCall;
+  readonly request: ReturnType<typeof buildCanonicalCreateCallRequest>;
+} {
+  const canonical = createSupplierCallSchema.safeParse(input);
+  if (!canonical.success) {
+    throw creationFailure();
+  }
+  return {
+    canonicalInput: canonical.data,
+    request: buildCanonicalCreateCallRequest(canonical.data),
+  };
+}
+
+export function buildCreateCallRequest(input: CreateSupplierCall) {
+  return prepareCreateCallRequest(input).request;
 }

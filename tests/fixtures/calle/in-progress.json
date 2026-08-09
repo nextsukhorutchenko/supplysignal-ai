@@ -1,19 +1,47 @@
 {
-  "call_id": "call_demo_001",
+  "id": "call_demo_001",
+  "object": "call_task",
   "status": "in_progress",
-  "created_at": "2026-08-09T12:00:00.000Z",
-  "updated_at": "2026-08-09T12:00:05.000Z",
-  "task_completed": false,
-  "completion_confidence": {
-    "score": 0.1,
-    "label": "pending"
-  },
-  "transcript": [
+  "task": "Confirm the fictional supplier order.",
+  "recipients": [
     {
-      "speaker": "assistant",
-      "text": "This is an AI-assisted fictional supplier demo."
+      "id": "rcp_demo_001",
+      "phones": ["<FICTIONAL_E164>"],
+      "locale": "en-US",
+      "region": "US",
+      "status": "in_progress",
+      "structured_result": null,
+      "summary": null,
+      "attempts": [
+        {
+          "id": "att_demo_001",
+          "phone": "<FICTIONAL_E164>",
+          "status": "in_progress",
+          "started_at": "2026-08-09T12:00:05.000Z",
+          "completed_at": null,
+          "summary": null,
+          "transcript_turns": [
+            {
+              "offset_seconds": 0,
+              "speaker": "bot",
+              "text": "This is an AI-assisted fictional supplier demo."
+            }
+          ],
+          "provider_call_id": "provider_demo_001",
+          "failure_code": null,
+          "failure_message": null
+        }
+      ]
     }
   ],
-  "recipient_result": null,
-  "evidence": []
+  "structured_result": null,
+  "summary": null,
+  "task_completed": null,
+  "completion_confidence": null,
+  "evidence": [],
+  "metadata": { "workflow_run_id": "run_001" },
+  "failure_code": null,
+  "failure_message": null,
+  "created_at": "2026-08-09T12:00:00.000Z",
+  "completed_at": null
 }

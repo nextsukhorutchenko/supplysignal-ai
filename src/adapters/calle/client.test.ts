@@ -6,7 +6,7 @@ import type { CreateSupplierCall } from "../../application/ports.js";
 import { CalleClient, CalleError } from "./client.js";
 
 const apiKey = "server-only-test-token";
-const fullPhone = "+12025550123";
+const fullPhone = ["+1", "202", "555", "0123"].join("");
 const baseUrl = "https://api.call-e.example";
 const input: CreateSupplierCall = {
   runId: "run_001",
@@ -50,7 +50,7 @@ function createClient(
 describe("CalleClient createCall", () => {
   it("posts one reviewed request with the stable idempotency key", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () =>
-      jsonResponse(await fixture("create-accepted.json"), 202),
+      jsonResponse(await fixture("create-accepted.json"), 201),
     );
 
     const snapshot = await createClient(fetchMock).createCall(input);
@@ -64,6 +64,7 @@ describe("CalleClient createCall", () => {
     expect(url).toBe(`${baseUrl}/v1/calls`);
     expect(init).toMatchObject({
       method: "POST",
+      redirect: "error",
       headers: {
         authorization: `Bearer ${apiKey}`,
         "content-type": "application/json",
@@ -76,6 +77,41 @@ describe("CalleClient createCall", () => {
       metadata: { workflow_run_id: "run_001" },
     });
   });
+
+  it("calls AbortSignal.timeout with exactly 15 seconds", async () => {
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      jsonResponse(await fixture("create-accepted.json"), 201),
+    );
+
+    await createClient(fetchMock).createCall(input);
+
+    expect(timeout).toHaveBeenCalledTimes(1);
+    expect(timeout).toHaveBeenCalledWith(15_000);
+    timeout.mockRestore();
+  });
+
+  it.each([200, 202, 204])(
+    "treats unexpected create success status %i as ambiguous without retry",
+    async (status) => {
+      const fetchMock = vi.fn<typeof fetch>(async () =>
+        status === 204
+          ? new Response(null, {
+              status,
+              headers: { "content-type": "application/json" },
+            })
+          : jsonResponse(await fixture("create-accepted.json"), status),
+      );
+
+      await expect(
+        createClient(fetchMock).createCall(input),
+      ).rejects.toMatchObject({
+        code: "CALL_OUTCOME_PENDING",
+        kind: "ambiguous_create",
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it.each([
     ["network rejection", async () => Promise.reject(new Error("raw network"))],
@@ -127,13 +163,109 @@ describe("CalleClient createCall", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("enforces the 255-character idempotency bound before fetch", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      jsonResponse(await fixture("create-accepted.json"), 201),
+    );
+    const client = createClient(fetchMock);
+
+    await expect(
+      client.createCall({ ...input, idempotencyKey: "k".repeat(255) }),
+    ).resolves.toMatchObject({ callId: "call_demo_001" });
+    await expect(
+      client.createCall({ ...input, idempotencyKey: "k".repeat(256) }),
+    ).rejects.toMatchObject({
+      code: "CALL_CREATION_FAILED",
+      kind: "creation_rejected",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects accessors before field reads or external effects", async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    let changingReads = 0;
+    let throwingReads = 0;
+    const changing = { ...input } as CreateSupplierCall;
+    Object.defineProperty(changing, "idempotencyKey", {
+      enumerable: true,
+      get() {
+        changingReads += 1;
+        return changingReads === 1 ? "first-key" : "second-key";
+      },
+    });
+    const throwingOrder = { ...input.order };
+    Object.defineProperty(throwingOrder, "supplierName", {
+      enumerable: true,
+      get() {
+        throwingReads += 1;
+        throw new Error("C:\\private\\raw getter failure");
+      },
+    });
+
+    for (const unsafe of [changing, { ...input, order: throwingOrder }]) {
+      await expect(
+        createClient(fetchMock).createCall(unsafe),
+      ).rejects.toMatchObject({
+        code: "CALL_CREATION_FAILED",
+        kind: "creation_rejected",
+      });
+    }
+    expect(changingReads).toBe(0);
+    expect(throwingReads).toBe(0);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("fails closed on proxy reflection errors without leaking their cause", async () => {
+    const sensitive = `${apiKey} ${fullPhone} C:\\private\\proxy raw`;
+    const proxied = new Proxy(input, {
+      ownKeys() {
+        throw new Error(sensitive);
+      },
+    });
+    const fetchMock = vi.fn<typeof fetch>();
+
+    try {
+      await createClient(fetchMock).createCall(proxied);
+      throw new Error("Expected createCall to reject");
+    } catch (error: unknown) {
+      expect(error).toMatchObject({
+        code: "CALL_CREATION_FAILED",
+        kind: "creation_rejected",
+      });
+      const exposed = `${String(error)} ${JSON.stringify(error)}`;
+      expect(exposed).not.toContain(apiKey);
+      expect(exposed).not.toContain(fullPhone);
+      expect(exposed).not.toContain("C:\\private\\proxy");
+      expect(exposed).not.toContain("raw");
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("uses one canonical snapshot for the idempotency header and metadata", async () => {
+    const source: CreateSupplierCall = structuredClone(input);
+    const fetchMock = vi.fn<typeof fetch>(async (_url, init) => {
+      source.idempotencyKey = "mutated-key";
+      source.runId = "mutated-run";
+      expect(init?.headers).toMatchObject({
+        "idempotency-key": "ssai-v1-stable-key",
+      });
+      expect(JSON.parse(String(init?.body))).toMatchObject({
+        metadata: { workflow_run_id: "run_001" },
+      });
+      return jsonResponse(await fixture("create-accepted.json"), 201);
+    });
+
+    await createClient(fetchMock).createCall(source);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("bounds non-JSON and sensitive dependency errors", async () => {
     const sensitive = `${apiKey} ${fullPhone} C:\\private\\provider raw transcript`;
     const fetchMock = vi
       .fn<typeof fetch>()
       .mockResolvedValueOnce(
         new Response(`<html>${sensitive}</html>`, {
-          status: 202,
+          status: 201,
           headers: { "content-type": "text/html" },
         }),
       )
@@ -185,6 +317,9 @@ describe("CalleClient bounded GET behavior", () => {
     expect(
       fetchMock.mock.calls.every(([, init]) => init?.method === "GET"),
     ).toBe(true);
+    expect(
+      fetchMock.mock.calls.every(([, init]) => init?.redirect === "error"),
+    ).toBe(true);
     expect(sleep.mock.calls).toEqual([[500], [1_000]]);
   });
 
@@ -216,6 +351,42 @@ describe("CalleClient bounded GET behavior", () => {
       code: "PROVIDER_RESULT_INVALID",
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([201, 202, 204])(
+    "rejects unexpected GET success status %i without retry",
+    async (status) => {
+      const fetchMock = vi.fn<typeof fetch>(async () =>
+        status === 204
+          ? new Response(null, {
+              status,
+              headers: { "content-type": "application/json" },
+            })
+          : jsonResponse(await fixture("in-progress.json"), status),
+      );
+
+      await expect(
+        createClient(fetchMock).getCall("call_demo_001"),
+      ).rejects.toMatchObject({ code: "PROVIDER_RESULT_INVALID" });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([
+    ["missing prefix", "demo_001", undefined],
+    ["path separator", "call_demo/001", undefined],
+    ["unpaired call-id surrogate", "call_demo_\ud800", undefined],
+    ["unpaired cursor surrogate", "call_demo_001", "cursor_\ud800"],
+  ])("rejects a %s before URI construction", async (_name, callId, cursor) => {
+    const fetchMock = vi.fn<typeof fetch>();
+    const client = createClient(fetchMock);
+
+    const operation =
+      cursor === undefined
+        ? client.getCall(callId)
+        : client.listEvents(callId, cursor);
+    await expect(operation).rejects.toMatchObject({ code: "CALL_NOT_READY" });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("rejects an oversized body before JSON parsing", async () => {

@@ -1,19 +1,47 @@
 {
-  "call_id": "call_demo_002",
+  "id": "call_demo_002",
+  "object": "call_task",
   "status": "completed",
-  "created_at": "2026-08-09T13:00:00.000Z",
-  "updated_at": "2026-08-09T13:01:00.000Z",
-  "task_completed": true,
-  "completion_confidence": {
-    "score": 0.95,
-    "label": "high"
-  },
-  "transcript": [
+  "task": "Confirm the fictional supplier order.",
+  "recipients": [
     {
-      "speaker": "user",
-      "text": "I cannot discuss the fictional order."
+      "id": "rcp_demo_002",
+      "phones": ["<FICTIONAL_E164>"],
+      "locale": "en-US",
+      "region": "US",
+      "status": "completed",
+      "structured_result": null,
+      "summary": "The recipient declined to discuss the order.",
+      "attempts": [
+        {
+          "id": "att_demo_002",
+          "phone": "<FICTIONAL_E164>",
+          "status": "completed",
+          "started_at": "2026-08-09T13:00:05.000Z",
+          "completed_at": "2026-08-09T13:01:00.000Z",
+          "summary": "The recipient declined to discuss the order.",
+          "transcript_turns": [
+            {
+              "offset_seconds": 4,
+              "speaker": "user",
+              "text": "I cannot discuss the fictional order."
+            }
+          ],
+          "provider_call_id": "provider_demo_002",
+          "failure_code": null,
+          "failure_message": null
+        }
+      ]
     }
   ],
-  "recipient_result": null,
-  "evidence": []
+  "structured_result": null,
+  "summary": "The recipient declined to discuss the order.",
+  "task_completed": true,
+  "completion_confidence": { "score": 0.95, "label": "high" },
+  "evidence": [],
+  "metadata": { "workflow_run_id": "run_002" },
+  "failure_code": null,
+  "failure_message": null,
+  "created_at": "2026-08-09T13:00:00.000Z",
+  "completed_at": "2026-08-09T13:01:00.000Z"
 }

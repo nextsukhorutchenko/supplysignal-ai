@@ -1,16 +1,25 @@
 {
-  "events": [
+  "object": "list",
+  "data": [
     {
       "id": "event_001",
       "type": "call.queued",
-      "occurred_at": "2026-08-09T12:00:00.000Z",
-      "summary": "Call queued"
+      "call_id": "call_demo_001",
+      "created_at": "2026-08-09T12:00:00.000Z",
+      "level": "info",
+      "status": "queued",
+      "message": "Call queued",
+      "details": { "region": "US", "locale": "en-US" }
     },
     {
       "id": "event_002",
       "type": "call.in_progress",
-      "occurred_at": "2026-08-09T12:00:05.000Z",
-      "summary": "Call in progress"
+      "call_id": "call_demo_001",
+      "created_at": "2026-08-09T12:00:05.000Z",
+      "level": "info",
+      "status": "in_progress",
+      "message": "Call in progress",
+      "details": { "region": "US", "locale": "en-US" }
     }
   ],
   "next_cursor": null

@@ -1,11 +1,41 @@
 {
-  "call_id": "call_demo_003",
+  "id": "call_demo_003",
+  "object": "call_task",
   "status": "failed",
-  "created_at": "2026-08-09T14:00:00.000Z",
-  "updated_at": "2026-08-09T14:00:10.000Z",
+  "task": "Confirm the fictional supplier order.",
+  "recipients": [
+    {
+      "id": "rcp_demo_003",
+      "phones": ["<FICTIONAL_E164>"],
+      "locale": "en-US",
+      "region": "US",
+      "status": "failed",
+      "structured_result": null,
+      "summary": null,
+      "attempts": [
+        {
+          "id": "att_demo_003",
+          "phone": "<FICTIONAL_E164>",
+          "status": "failed",
+          "started_at": "2026-08-09T14:00:05.000Z",
+          "completed_at": "2026-08-09T14:00:10.000Z",
+          "summary": null,
+          "transcript_turns": [],
+          "provider_call_id": null,
+          "failure_code": "provider_unavailable",
+          "failure_message": "The provider could not complete the attempt."
+        }
+      ]
+    }
+  ],
+  "structured_result": null,
+  "summary": null,
   "task_completed": false,
   "completion_confidence": null,
-  "transcript": [],
-  "recipient_result": null,
-  "evidence": []
+  "evidence": [],
+  "metadata": { "workflow_run_id": "run_003" },
+  "failure_code": "provider_unavailable",
+  "failure_message": "The provider could not complete the call.",
+  "created_at": "2026-08-09T14:00:00.000Z",
+  "completed_at": "2026-08-09T14:00:10.000Z"
 }

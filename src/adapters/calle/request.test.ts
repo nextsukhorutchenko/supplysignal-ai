@@ -7,6 +7,7 @@ import {
   recipientResultSchema,
 } from "./request.js";
 
+const fictionalPhone = ["+1", "202", "555", "0123"].join("");
 const input: CreateSupplierCall = {
   runId: "run_001",
   idempotencyKey: "ssai-v1-stable-key",
@@ -18,7 +19,7 @@ const input: CreateSupplierCall = {
   },
   recipient: {
     recipientName: "Consenting participant",
-    phoneE164: "+12025550123",
+    phoneE164: fictionalPhone,
     maskedPhone: "+1 ***-***-0123",
     region: "US",
     locale: "en-US",
@@ -35,7 +36,7 @@ describe("buildCreateCallRequest", () => {
     expect(request.task).toContain("PO-2048");
     expect(request.task).toContain("Northstar Components");
     expect(request.recipients).toEqual([
-      { phones: ["+12025550123"], region: "US", locale: "en-US" },
+      { phones: [fictionalPhone], region: "US", locale: "en-US" },
     ]);
     expect(request).not.toHaveProperty("webhook_url");
     expect(request).not.toHaveProperty("batch");
@@ -149,5 +150,47 @@ describe("buildCreateCallRequest", () => {
     expect(() =>
       buildCreateCallRequest({ ...input, ...override } as CreateSupplierCall),
     ).toThrow("CALL_CREATION_FAILED");
+  });
+
+  it("enforces the OpenAPI Idempotency-Key maximum of 255 characters", () => {
+    expect(() =>
+      buildCreateCallRequest({ ...input, idempotencyKey: "k".repeat(255) }),
+    ).not.toThrow();
+    expect(() =>
+      buildCreateCallRequest({ ...input, idempotencyKey: "k".repeat(256) }),
+    ).toThrow("CALL_CREATION_FAILED");
+    expect(() =>
+      buildCreateCallRequest({ ...input, idempotencyKey: "key_\ud800" }),
+    ).toThrow("CALL_CREATION_FAILED");
+  });
+
+  it("rejects changing and throwing accessors without invoking them", () => {
+    let changingReads = 0;
+    let throwingReads = 0;
+    const changing = { ...input } as CreateSupplierCall;
+    Object.defineProperty(changing, "idempotencyKey", {
+      enumerable: true,
+      get() {
+        changingReads += 1;
+        return changingReads === 1 ? "stable-key" : "different-key";
+      },
+    });
+    const throwingOrder = { ...input.order };
+    Object.defineProperty(throwingOrder, "supplierName", {
+      enumerable: true,
+      get() {
+        throwingReads += 1;
+        throw new Error("C:\\private\\raw getter failure");
+      },
+    });
+
+    expect(() => buildCreateCallRequest(changing)).toThrow(
+      "CALL_CREATION_FAILED",
+    );
+    expect(() =>
+      buildCreateCallRequest({ ...input, order: throwingOrder }),
+    ).toThrow("CALL_CREATION_FAILED");
+    expect(changingReads).toBe(0);
+    expect(throwingReads).toBe(0);
   });
 });
