@@ -1,0 +1,19 @@
+{
+  "call_id": "call_demo_002",
+  "status": "completed",
+  "created_at": "2026-08-09T13:00:00.000Z",
+  "updated_at": "2026-08-09T13:01:00.000Z",
+  "task_completed": true,
+  "completion_confidence": {
+    "score": 0.95,
+    "label": "high"
+  },
+  "transcript": [
+    {
+      "speaker": "user",
+      "text": "I cannot discuss the fictional order."
+    }
+  ],
+  "recipient_result": null,
+  "evidence": []
+}

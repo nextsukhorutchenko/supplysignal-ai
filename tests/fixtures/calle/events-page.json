@@ -1,0 +1,17 @@
+{
+  "events": [
+    {
+      "id": "event_001",
+      "type": "call.queued",
+      "occurred_at": "2026-08-09T12:00:00.000Z",
+      "summary": "Call queued"
+    },
+    {
+      "id": "event_002",
+      "type": "call.in_progress",
+      "occurred_at": "2026-08-09T12:00:05.000Z",
+      "summary": "Call in progress"
+    }
+  ],
+  "next_cursor": null
+}

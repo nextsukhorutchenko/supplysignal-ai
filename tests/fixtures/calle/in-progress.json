@@ -1,0 +1,19 @@
+{
+  "call_id": "call_demo_001",
+  "status": "in_progress",
+  "created_at": "2026-08-09T12:00:00.000Z",
+  "updated_at": "2026-08-09T12:00:05.000Z",
+  "task_completed": false,
+  "completion_confidence": {
+    "score": 0.1,
+    "label": "pending"
+  },
+  "transcript": [
+    {
+      "speaker": "assistant",
+      "text": "This is an AI-assisted fictional supplier demo."
+    }
+  ],
+  "recipient_result": null,
+  "evidence": []
+}

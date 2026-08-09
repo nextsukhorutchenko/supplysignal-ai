@@ -1,0 +1,11 @@
+{
+  "call_id": "call_demo_004",
+  "status": "provider_future_status",
+  "created_at": "2026-08-09T15:00:00.000Z",
+  "updated_at": "2026-08-09T15:00:10.000Z",
+  "task_completed": null,
+  "completion_confidence": null,
+  "transcript": [],
+  "recipient_result": null,
+  "evidence": []
+}

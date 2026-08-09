@@ -1,0 +1,38 @@
+{
+  "call_id": "call_demo_001",
+  "status": "completed",
+  "created_at": "2026-08-09T12:00:00.000Z",
+  "updated_at": "2026-08-09T12:02:00.000Z",
+  "task_completed": true,
+  "completion_confidence": {
+    "score": 0.98,
+    "label": "high"
+  },
+  "transcript": [
+    {
+      "speaker": "assistant",
+      "text": "How many fictional units are ready now?"
+    },
+    {
+      "speaker": "user",
+      "text": "Three hundred fifty are ready and one hundred fifty are delayed."
+    }
+  ],
+  "recipient_result": {
+    "contact_outcome": "reached",
+    "confirmed_quantity": 500,
+    "available_quantity": 350,
+    "delayed_quantity": 150,
+    "promised_delivery_date": "2026-08-22",
+    "delay_reason": "Component shortage",
+    "follow_up_required": "yes",
+    "unable_to_fulfill": "no"
+  },
+  "evidence": [
+    {
+      "id": "evidence_001",
+      "excerpt": "Three hundred fifty are ready and one hundred fifty are delayed.",
+      "turn_indexes": [1]
+    }
+  ]
+}
