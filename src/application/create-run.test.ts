@@ -6,6 +6,8 @@ import { createRun } from "./create-run.js";
 import type { Clock, IdGenerator, RunStore } from "./ports.js";
 
 const fullPhone = "+12025550123";
+const canonicalUsPhone = ["+1", "202", "555", "0123"].join("");
+const canonicalKenyaPhone = ["+254", "100", "000", "000"].join("");
 const sensitiveDependencyError = new Error(
   `${fullPhone} C:\\private\\operator\\runs internal dependency detail`,
 );
@@ -24,6 +26,22 @@ const validInput = {
     locale: "en-US",
   },
 };
+
+const canonicalUsRecipient = {
+  recipientName: "Consenting participant",
+  phoneE164: canonicalUsPhone,
+  maskedPhone: "+1 ***-***-0123",
+  region: "US",
+  locale: "en-US",
+} as const;
+
+const canonicalKenyaRecipient = {
+  recipientName: "Consenting participant",
+  phoneE164: canonicalKenyaPhone,
+  maskedPhone: "+254 ***-**-0000",
+  region: "KE",
+  locale: "en-KE",
+} as const;
 
 class RecordingRunStore implements RunStore {
   readonly created: RunRecord[] = [];
@@ -54,6 +72,73 @@ const clock: Clock = {
 const ids: IdGenerator = { next: () => "run-001" };
 
 describe("createRun", () => {
+  it.each([
+    ["United States", canonicalUsRecipient],
+    ["Kenya", canonicalKenyaRecipient],
+  ] as const)(
+    "accepts and persists an exact canonical %s recipient",
+    async (_profile, recipient) => {
+      const store = new RecordingRunStore();
+
+      const run = await createRun(
+        { store, clock, ids },
+        { order: validInput.order, recipient },
+      );
+
+      expect(run.recipient).toEqual(recipient);
+      expect(store.created).toHaveLength(1);
+      expect(store.created[0]?.recipient).toEqual(recipient);
+      expect(run.recipient).not.toBe(recipient);
+      expect(store.created[0]?.recipient).not.toBe(recipient);
+      expect(store.created[0]?.recipient).not.toBe(run.recipient);
+    },
+  );
+
+  it.each([
+    [
+      "invalid canonical mask",
+      { ...canonicalUsRecipient, maskedPhone: "+1 ***-***-9999" },
+    ],
+    [
+      "cross-profile canonical values",
+      {
+        ...canonicalKenyaRecipient,
+        region: "US",
+        locale: "en-US",
+      },
+    ],
+    [
+      "extra canonical field",
+      { ...canonicalUsRecipient, unexpected: "not permitted" },
+    ],
+  ])("rejects %s before persistence", async (_case, recipient) => {
+    const store = new RecordingRunStore();
+
+    await expect(
+      createRun({ store, clock, ids }, { order: validInput.order, recipient }),
+    ).rejects.toThrow("Expected safe plain JSON data");
+    expect(store.created).toHaveLength(0);
+  });
+
+  it("rejects an accessor-backed canonical recipient without reading it", async () => {
+    const store = new RecordingRunStore();
+    let getterCalls = 0;
+    const recipient = { ...canonicalUsRecipient };
+    Object.defineProperty(recipient, "maskedPhone", {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return canonicalUsRecipient.maskedPhone;
+      },
+    });
+
+    await expect(
+      createRun({ store, clock, ids }, { order: validInput.order, recipient }),
+    ).rejects.toThrow("Expected safe plain JSON data");
+    expect(getterCalls).toBe(0);
+    expect(store.created).toHaveLength(0);
+  });
+
   it("creates separate validated graphs for persistence and the caller", async () => {
     const store = new RecordingRunStore();
 
