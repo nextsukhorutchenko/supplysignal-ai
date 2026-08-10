@@ -808,49 +808,92 @@ describe("actual offline CLI composition", () => {
       apiKey,
       phone,
       mockFileSystem: (actual) => {
-        function afterCommit<T extends unknown[]>(
-          name: string,
-          operation: (...arguments_: T) => unknown,
-        ) {
-          return async (...arguments_: T) => {
-            if (committed) {
-              postCommitOperations.push(name);
-              throw new Error(`fallible ${name} after commit`);
-            }
-            return operation(...arguments_);
-          };
+        async function guardOperation(
+          displayName: string,
+          operationName: string,
+          operation: (...arguments_: unknown[]) => unknown,
+          receiver: unknown,
+          arguments_: unknown[],
+        ): Promise<unknown> {
+          if (committed) {
+            postCommitOperations.push(displayName);
+            throw new Error(`fallible ${displayName} after commit`);
+          }
+          const result = await Reflect.apply(operation, receiver, arguments_);
+          if (
+            operationName === "unlink" &&
+            String(arguments_[0]).includes(".result-") &&
+            String(arguments_[0]).endsWith(".tmp")
+          ) {
+            committed = true;
+          }
+          if (
+            operationName !== "open" ||
+            typeof result !== "object" ||
+            result === null
+          ) {
+            return result;
+          }
+          return new Proxy(result, {
+            get(target, property) {
+              const member = Reflect.get(target, property, target) as unknown;
+              if (typeof member !== "function") {
+                return member;
+              }
+              return (...resourceArguments: unknown[]) =>
+                guardOperation(
+                  `${displayName}.${String(property)}`,
+                  String(property),
+                  member as (...arguments_: unknown[]) => unknown,
+                  target,
+                  resourceArguments,
+                );
+            },
+          });
         }
-        return {
-          lstat: afterCommit(
-            "lstat",
-            actual.lstat.bind(actual),
-          ) as typeof actual.lstat,
-          realpath: afterCommit(
-            "realpath",
-            actual.realpath.bind(actual),
-          ) as typeof actual.realpath,
-          open: afterCommit(
-            "open",
-            actual.open.bind(actual),
-          ) as typeof actual.open,
-          link: afterCommit(
-            "link",
-            actual.link.bind(actual),
-          ) as typeof actual.link,
-          unlink: async (path) => {
-            if (committed) {
-              postCommitOperations.push("unlink");
-              throw new Error("fallible unlink after commit");
+
+        function guardNamespace(namespace: object, prefix: string): object {
+          return new Proxy(namespace, {
+            get(target, property) {
+              const value = Reflect.get(target, property, target) as unknown;
+              if (typeof value !== "function") {
+                return value;
+              }
+              return (...arguments_: unknown[]) =>
+                guardOperation(
+                  `${prefix}.${String(property)}`,
+                  String(property),
+                  value as (...arguments_: unknown[]) => unknown,
+                  target,
+                  arguments_,
+                );
+            },
+          });
+        }
+
+        return Object.fromEntries(
+          Reflect.ownKeys(actual).map((property) => {
+            const name = String(property);
+            const value = Reflect.get(actual, property) as unknown;
+            if (name === "default" && typeof value === "object" && value) {
+              return [property, guardNamespace(value, name)];
             }
-            await actual.unlink(path);
-            if (
-              String(path).includes(".result-") &&
-              String(path).endsWith(".tmp")
-            ) {
-              committed = true;
+            if (typeof value !== "function") {
+              return [property, value];
             }
-          },
-        };
+            return [
+              property,
+              (...arguments_: unknown[]) =>
+                guardOperation(
+                  name,
+                  name,
+                  value as (...arguments_: unknown[]) => unknown,
+                  actual,
+                  arguments_,
+                ),
+            ];
+          }),
+        ) as Partial<typeof actual>;
       },
     });
 
@@ -862,6 +905,43 @@ describe("actual offline CLI composition", () => {
     } finally {
       await removeSession(guardedRunId);
     }
+  });
+
+  it("preserves committed success when sanitized output reporting throws", async () => {
+    const { createPreflightProcess } = await freshModule();
+    let evidenceCommitted = false;
+    const writeOutput = vi.fn((message: string) => {
+      if (message.startsWith("{")) {
+        throw new Error("simulated post-commit output failure");
+      }
+    });
+    const input = validInput({
+      writeOutput,
+      writePrivateEvidence: vi.fn(async () => {
+        evidenceCommitted = true;
+      }),
+    });
+
+    await expect(createPreflightProcess()(input)).resolves.toMatchObject({
+      status: "PROVIDER_REPORTED_TERMINAL",
+    });
+    expect(evidenceCommitted).toBe(true);
+    expect(writeOutput).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not hide output failures before provider execution", async () => {
+    const { createPreflightProcess } = await freshModule();
+    const input = validInput({
+      writeOutput: vi.fn(() => {
+        throw new Error("simulated pre-commit output failure");
+      }),
+    });
+
+    await expect(createPreflightProcess()(input)).rejects.toThrow(
+      "simulated pre-commit output failure",
+    );
+    expect(input.execute).not.toHaveBeenCalled();
+    expect(input.writePrivateEvidence).not.toHaveBeenCalled();
   });
 
   it("keeps private evidence create-only when the final name already exists", async () => {

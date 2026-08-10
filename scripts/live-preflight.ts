@@ -187,7 +187,11 @@ export function createPreflightProcess() {
       providerStatus: result.run.providerSnapshot?.status ?? "not_available",
       eventCount: result.events.length,
     };
-    input.writeOutput(JSON.stringify(summary));
+    try {
+      input.writeOutput(JSON.stringify(summary));
+    } catch {
+      // Reporting cannot undo successfully committed private evidence.
+    }
     return summary;
   };
 }
