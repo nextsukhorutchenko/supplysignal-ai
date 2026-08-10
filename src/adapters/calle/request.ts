@@ -119,6 +119,7 @@ function buildCanonicalCreateCallRequest(input: CreateSupplierCall) {
   const task = [
     "You are SupplySignal AI, an automated calling agent.",
     "Immediately disclose that this is an AI-assisted fictional supplier demo and that the call may be recorded for an approved hackathon demonstration.",
+    "After the complete disclosure, keep each spoken turn concise and natural: one or two short sentences. Ask only one question at a time and wait for the recipient's answer. Do not read the entire purchase order at once or repeat facts the recipient has already confirmed.",
     `Ask about fictional purchase order ${input.order.purchaseOrderRef} from ${input.order.supplierName}.`,
     `Confirm the quantity expected (${input.order.expectedQuantity}), quantity ready now, quantity delayed, and promised delivery date relative to ${input.order.requiredDeliveryDate}.`,
     "Ask for the delay reason, whether human follow-up is required, and whether the supplier is unable to fulfill the order.",

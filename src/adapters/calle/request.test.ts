@@ -25,8 +25,42 @@ const input: CreateSupplierCall = {
     locale: "en-US",
   },
 };
+const mandatoryDisclosure =
+  "Immediately disclose that this is an AI-assisted fictional supplier demo and that the call may be recorded for an approved hackathon demonstration.";
+const conciseTurnInstruction =
+  "After the complete disclosure, keep each spoken turn concise and natural: one or two short sentences. Ask only one question at a time and wait for the recipient's answer. Do not read the entire purchase order at once or repeat facts the recipient has already confirmed.";
+const firstPurchaseOrderQuestion =
+  "Ask about fictional purchase order PO-2048 from Northstar Components.";
 
 describe("buildCreateCallRequest", () => {
+  it("keeps disclosure complete and applies the concise-turn policy before operational questions", () => {
+    const { task } = buildCreateCallRequest(input);
+    const taskLines = task.split("\n");
+
+    expect(taskLines).toEqual(
+      expect.arrayContaining([
+        mandatoryDisclosure,
+        conciseTurnInstruction,
+        firstPurchaseOrderQuestion,
+      ]),
+    );
+    expect(
+      taskLines.filter((line) => line === conciseTurnInstruction),
+    ).toHaveLength(1);
+    expect(taskLines.indexOf(mandatoryDisclosure)).toBe(1);
+    expect(taskLines.indexOf(conciseTurnInstruction)).toBe(
+      taskLines.indexOf(mandatoryDisclosure) + 1,
+    );
+    expect(taskLines.indexOf(firstPurchaseOrderQuestion)).toBe(
+      taskLines.indexOf(conciseTurnInstruction) + 1,
+    );
+    expect(task).toContain(
+      "If the recipient declines, stop politely and do not invent answers.",
+    );
+    expect(task).toContain("If nobody answers, do not infer supplier facts.");
+    expect(task.length).toBeLessThanOrEqual(4_000);
+  });
+
   it("builds the reviewed OpenAPI 0.6.0 one-recipient request", () => {
     const request = buildCreateCallRequest(input);
 
