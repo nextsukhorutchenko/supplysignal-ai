@@ -10,6 +10,7 @@ import {
   type FileHandle,
 } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
+import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createInterface } from "node:readline/promises";
 
@@ -97,9 +98,92 @@ export type PreflightSummary = {
   eventCount: number;
 };
 
-type PermitState = "available" | "reserved" | "consumed";
+type PermitReservation = symbol;
 
-let permitState: PermitState = "available";
+type ProcessPermit = Readonly<{
+  reserve(): PermitReservation | undefined;
+  release(reservation: PermitReservation): void;
+  consume(reservation: PermitReservation): boolean;
+}>;
+
+const PROCESS_PERMIT_KEY = Symbol.for(
+  "supplysignal.live-preflight.one-call-permit",
+);
+
+const BLOCKED_PROCESS_PERMIT: ProcessPermit = Object.freeze({
+  reserve: () => undefined,
+  release: () => undefined,
+  consume: () => false,
+});
+
+function createProcessPermit(): ProcessPermit {
+  let state:
+    | { readonly kind: "available" }
+    | { readonly kind: "reserved"; readonly token: PermitReservation }
+    | { readonly kind: "consumed" } = { kind: "available" };
+
+  return Object.freeze({
+    reserve(): PermitReservation | undefined {
+      if (state.kind !== "available") {
+        return undefined;
+      }
+      const token = Symbol("preflight-permit-reservation");
+      state = { kind: "reserved", token };
+      return token;
+    },
+    release(token: PermitReservation): void {
+      if (state.kind === "reserved" && state.token === token) {
+        state = { kind: "available" };
+      }
+    },
+    consume(token: PermitReservation): boolean {
+      if (state.kind !== "reserved" || state.token !== token) {
+        return false;
+      }
+      state = { kind: "consumed" };
+      return true;
+    },
+  });
+}
+
+function isProcessPermit(value: unknown): value is ProcessPermit {
+  if (typeof value !== "object" || value === null || !Object.isFrozen(value)) {
+    return false;
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  return (
+    typeof descriptors.reserve?.value === "function" &&
+    typeof descriptors.release?.value === "function" &&
+    typeof descriptors.consume?.value === "function"
+  );
+}
+
+function getProcessPermit(): ProcessPermit {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(
+      process,
+      PROCESS_PERMIT_KEY,
+    );
+    if (descriptor !== undefined) {
+      return "value" in descriptor && isProcessPermit(descriptor.value)
+        ? descriptor.value
+        : BLOCKED_PROCESS_PERMIT;
+    }
+
+    const permit = createProcessPermit();
+    Object.defineProperty(process, PROCESS_PERMIT_KEY, {
+      configurable: false,
+      enumerable: false,
+      value: permit,
+      writable: false,
+    });
+    return permit;
+  } catch {
+    return BLOCKED_PROCESS_PERMIT;
+  }
+}
+
+const processPermit = getProcessPermit();
 
 function fail(code: PreflightErrorCode): never {
   throw new PreflightError(code);
@@ -155,10 +239,10 @@ export function createPreflightProcess() {
     if (!input.isInteractive) {
       fail("PREFLIGHT_INTERACTIVE_REQUIRED");
     }
-    if (permitState !== "available") {
+    const reservation = processPermit.reserve();
+    if (reservation === undefined) {
       fail("PREFLIGHT_CALL_LIMIT_REACHED");
     }
-    permitState = "reserved";
 
     try {
       input.writeOutput(
@@ -174,13 +258,13 @@ export function createPreflightProcess() {
         fail("AUTHORIZATION_REQUIRED");
       }
     } catch (error: unknown) {
-      if (permitState === "reserved") {
-        permitState = "available";
-      }
+      processPermit.release(reservation);
       throw error;
     }
 
-    permitState = "consumed";
+    if (!processPermit.consume(reservation)) {
+      fail("PREFLIGHT_CALL_LIMIT_REACHED");
+    }
     const result = await input.execute({
       scenario,
       recipient: configuration.recipient,

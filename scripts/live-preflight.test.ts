@@ -29,9 +29,21 @@ const privateRoot = resolve(repositoryRoot, "tmp", "preflight-private");
 
 type PreflightModule = typeof import("./live-preflight.js");
 
-async function freshModule(): Promise<PreflightModule> {
+function resetPreflightModuleContext(): void {
   vi.resetModules();
+  vi.doUnmock("node:process");
+  const isolatedProcess = Object.create(process) as NodeJS.Process;
+  vi.doMock("node:process", () => ({ default: isolatedProcess }));
+}
+
+async function freshModule(): Promise<PreflightModule> {
+  resetPreflightModuleContext();
   return import("./live-preflight.js");
+}
+
+async function queryModule(query: string): Promise<PreflightModule> {
+  const specifier = `./live-preflight.js?${query}`;
+  return (await import(/* @vite-ignore */ specifier)) as PreflightModule;
 }
 
 function terminalRun(input: PreflightExecutionInput): PreflightExecutionResult {
@@ -116,7 +128,7 @@ type GuardedCliResult = {
 async function runGuardedCli(
   options: GuardedCliOptions = {},
 ): Promise<GuardedCliResult> {
-  vi.resetModules();
+  resetPreflightModuleContext();
   vi.doUnmock("node:crypto");
   vi.doUnmock("node:fs/promises");
   vi.doUnmock("node:readline/promises");
@@ -231,6 +243,7 @@ async function runGuardedCli(
     vi.unstubAllGlobals();
     vi.doUnmock("node:crypto");
     vi.doUnmock("node:fs/promises");
+    vi.doUnmock("node:process");
     vi.doUnmock("node:readline/promises");
     vi.resetModules();
   }
@@ -387,6 +400,39 @@ describe("live CALL-E preflight safety boundary", () => {
     await expect(first).resolves.toMatchObject({
       status: "PROVIDER_REPORTED_TERMINAL",
     });
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("shares one atomic execution permit across distinct ESM module instances", async () => {
+    resetPreflightModuleContext();
+    const firstModule = await queryModule("permit-a");
+    const secondModule = await queryModule("permit-b");
+    let authorize: ((value: string) => void) | undefined;
+    const prompt = vi.fn(
+      async () =>
+        new Promise<string>((resolvePrompt) => {
+          authorize = resolvePrompt;
+        }),
+    );
+    const execute = vi.fn(async (input: PreflightExecutionInput) =>
+      terminalRun(input),
+    );
+    const first = firstModule.createPreflightProcess()(
+      validInput({ prompt, execute }),
+    );
+    const second = secondModule.createPreflightProcess()(
+      validInput({ execute }),
+    );
+    const secondExpectation = expect(second).rejects.toMatchObject({
+      code: "PREFLIGHT_CALL_LIMIT_REACHED",
+    });
+
+    expect(firstModule).not.toBe(secondModule);
+    authorize?.("AUTHORIZE ONE CALL");
+    await expect(first).resolves.toMatchObject({
+      status: "PROVIDER_REPORTED_TERMINAL",
+    });
+    await secondExpectation;
     expect(execute).toHaveBeenCalledTimes(1);
   });
 
