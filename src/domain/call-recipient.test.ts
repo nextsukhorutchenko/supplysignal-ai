@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   callRecipientSchema,
   createCallRecipient,
+  getCallRecipientPresentation,
   maskPhoneNumber,
 } from "./call-recipient.js";
 
@@ -12,6 +13,17 @@ const validRecipient = {
   maskedPhone: "+1 ***-***-1234",
   region: "US",
   locale: "en-US",
+} as const;
+
+const kenyaLowerBoundary = ["+254", "100", "000", "000"].join("");
+const kenyaUpperBoundary = ["+254", "999", "999", "999"].join("");
+
+const validKenyaRecipient = {
+  recipientName: "Consenting participant",
+  phoneE164: kenyaLowerBoundary,
+  maskedPhone: "+254 ***-**-0000",
+  region: "KE",
+  locale: "en-KE",
 } as const;
 
 describe("call recipients", () => {
@@ -25,6 +37,57 @@ describe("call recipients", () => {
         locale: "en-US",
       }),
     ).toEqual(validRecipient);
+    expect(getCallRecipientPresentation(validRecipient)).toEqual({
+      country: "United States",
+      language: "English",
+    });
+  });
+
+  it("creates the canonical Kenya English recipient from the phone", () => {
+    expect(
+      createCallRecipient({
+        recipientName: "  Consenting participant  ",
+        phoneE164: kenyaLowerBoundary,
+      }),
+    ).toEqual(validKenyaRecipient);
+    expect(maskPhoneNumber(kenyaUpperBoundary)).toBe("+254 ***-**-9999");
+    expect(getCallRecipientPresentation(validKenyaRecipient)).toEqual({
+      country: "Kenya",
+      language: "English",
+    });
+  });
+
+  it.each([
+    ["local format", ["07", "00", "000", "000"].join("")],
+    ["zero national prefix", ["+254", "000", "000", "000"].join("")],
+    ["too short", ["+254", "100", "000", "00"].join("")],
+    ["too long", ["+254", "100", "000", "000", "0"].join("")],
+    ["spaces", ["+254 ", "100 ", "000 000"].join("")],
+    ["extension", ["+254", "100", "000", "000", "x1"].join("")],
+  ])("rejects Kenya %s before canonicalization", (_case, phoneE164) => {
+    expect(() =>
+      createCallRecipient({
+        recipientName: "Consenting participant",
+        phoneE164,
+      }),
+    ).toThrow();
+  });
+
+  it("rejects every cross-profile region and locale pair", () => {
+    expect(() =>
+      createCallRecipient({
+        recipientName: "Consenting participant",
+        phoneE164: kenyaLowerBoundary,
+        region: "US",
+        locale: "en-US",
+      }),
+    ).toThrow();
+    expect(() =>
+      callRecipientSchema.parse({
+        ...validKenyaRecipient,
+        locale: "en-US",
+      }),
+    ).toThrow();
   });
 
   it.each(["+11155551234", "+44155551234", "+1415555123", "14155551234"])(
@@ -69,5 +132,20 @@ describe("call recipients", () => {
         extra: true,
       }),
     ).toThrow();
+  });
+
+  it("rejects an accessor-backed Kenya phone without reading its getter", () => {
+    let calls = 0;
+    const input = { recipientName: "Consenting participant" };
+    Object.defineProperty(input, "phoneE164", {
+      enumerable: true,
+      get() {
+        calls += 1;
+        return kenyaLowerBoundary;
+      },
+    });
+
+    expect(() => createCallRecipient(input)).toThrow();
+    expect(calls).toBe(0);
   });
 });
