@@ -10,6 +10,7 @@ import {
   type FileHandle,
 } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
+import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createInterface } from "node:readline/promises";
 
@@ -22,7 +23,11 @@ import { createRun } from "../src/application/create-run.js";
 import type { CalleEventPage, Clock } from "../src/application/ports.js";
 import { reconcileRun } from "../src/application/reconcile-run.js";
 import { startRun } from "../src/application/start-run.js";
-import { createCallRecipient } from "../src/domain/call-recipient.js";
+import {
+  createCallRecipient,
+  getCallRecipientPresentation,
+  type CallRecipient,
+} from "../src/domain/call-recipient.js";
 import { AppError } from "../src/domain/errors.js";
 import {
   runRecordSchema,
@@ -48,7 +53,7 @@ export type PreflightScenario = z.infer<typeof scenarioSchema>;
 
 export type PreflightExecutionInput = {
   scenario: PreflightScenario;
-  phone: string;
+  recipient: CallRecipient;
   apiKey: string;
 };
 
@@ -86,14 +91,99 @@ export type PreflightProcessInput = {
 export type PreflightSummary = {
   scenario: PreflightScenario;
   maskedPhone: string;
+  country: "United States" | "Kenya";
+  language: "English";
   status: RunRecord["status"];
   providerStatus: ProviderEvidenceSnapshot["status"] | "not_available";
   eventCount: number;
 };
 
-type PermitState = "available" | "reserved" | "consumed";
+type PermitReservation = symbol;
 
-let permitState: PermitState = "available";
+type ProcessPermit = Readonly<{
+  reserve(): PermitReservation | undefined;
+  release(reservation: PermitReservation): void;
+  consume(reservation: PermitReservation): boolean;
+}>;
+
+const PROCESS_PERMIT_KEY = Symbol.for(
+  "supplysignal.live-preflight.one-call-permit",
+);
+
+const BLOCKED_PROCESS_PERMIT: ProcessPermit = Object.freeze({
+  reserve: () => undefined,
+  release: () => undefined,
+  consume: () => false,
+});
+
+function createProcessPermit(): ProcessPermit {
+  let state:
+    | { readonly kind: "available" }
+    | { readonly kind: "reserved"; readonly token: PermitReservation }
+    | { readonly kind: "consumed" } = { kind: "available" };
+
+  return Object.freeze({
+    reserve(): PermitReservation | undefined {
+      if (state.kind !== "available") {
+        return undefined;
+      }
+      const token = Symbol("preflight-permit-reservation");
+      state = { kind: "reserved", token };
+      return token;
+    },
+    release(token: PermitReservation): void {
+      if (state.kind === "reserved" && state.token === token) {
+        state = { kind: "available" };
+      }
+    },
+    consume(token: PermitReservation): boolean {
+      if (state.kind !== "reserved" || state.token !== token) {
+        return false;
+      }
+      state = { kind: "consumed" };
+      return true;
+    },
+  });
+}
+
+function isProcessPermit(value: unknown): value is ProcessPermit {
+  if (typeof value !== "object" || value === null || !Object.isFrozen(value)) {
+    return false;
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  return (
+    typeof descriptors.reserve?.value === "function" &&
+    typeof descriptors.release?.value === "function" &&
+    typeof descriptors.consume?.value === "function"
+  );
+}
+
+function getProcessPermit(): ProcessPermit {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(
+      process,
+      PROCESS_PERMIT_KEY,
+    );
+    if (descriptor !== undefined) {
+      return "value" in descriptor && isProcessPermit(descriptor.value)
+        ? descriptor.value
+        : BLOCKED_PROCESS_PERMIT;
+    }
+
+    const permit = createProcessPermit();
+    Object.defineProperty(process, PROCESS_PERMIT_KEY, {
+      configurable: false,
+      enumerable: false,
+      value: permit,
+      writable: false,
+    });
+    return permit;
+  } catch {
+    return BLOCKED_PROCESS_PERMIT;
+  }
+}
+
+const processPermit = getProcessPermit();
 
 function fail(code: PreflightErrorCode): never {
   throw new PreflightError(code);
@@ -116,8 +206,9 @@ function parseScenario(argv: readonly string[]): PreflightScenario {
 
 function requireConfiguration(env: PreflightProcessInput["env"]): {
   apiKey: string;
-  phone: string;
-  maskedPhone: string;
+  recipient: CallRecipient;
+  country: "United States" | "Kenya";
+  language: "English";
 } {
   const apiKey = env.CALLE_API_KEY;
   const phone = env.SUPPLIER_TEST_PHONE;
@@ -131,14 +222,9 @@ function requireConfiguration(env: PreflightProcessInput["env"]): {
     const recipient = createCallRecipient({
       recipientName: "Consenting participant",
       phoneE164: phone,
-      region: "US",
-      locale: "en-US",
     });
-    return {
-      apiKey,
-      phone: recipient.phoneE164,
-      maskedPhone: recipient.maskedPhone,
-    };
+    const presentation = getCallRecipientPresentation(recipient);
+    return { apiKey, recipient, ...presentation };
   } catch {
     fail("UNSUPPORTED_RECIPIENT_REGION");
   }
@@ -153,36 +239,43 @@ export function createPreflightProcess() {
     if (!input.isInteractive) {
       fail("PREFLIGHT_INTERACTIVE_REQUIRED");
     }
-    if (permitState !== "available") {
+    const reservation = processPermit.reserve();
+    if (reservation === undefined) {
       fail("PREFLIGHT_CALL_LIMIT_REACHED");
     }
-    permitState = "reserved";
 
     try {
       input.writeOutput(
-        `Scenario: ${scenario}\nRecipient: ${configuration.maskedPhone}`,
+        [
+          `Scenario: ${scenario}`,
+          `Recipient: ${configuration.recipient.maskedPhone}`,
+          `Country: ${configuration.country}`,
+          `Language: ${configuration.language}`,
+        ].join("\n"),
       );
       const confirmation = await input.prompt(`Type ${AUTHORIZATION_PHRASE}: `);
       if (confirmation !== AUTHORIZATION_PHRASE) {
         fail("AUTHORIZATION_REQUIRED");
       }
     } catch (error: unknown) {
-      if (permitState === "reserved") {
-        permitState = "available";
-      }
+      processPermit.release(reservation);
       throw error;
     }
 
-    permitState = "consumed";
+    if (!processPermit.consume(reservation)) {
+      fail("PREFLIGHT_CALL_LIMIT_REACHED");
+    }
     const result = await input.execute({
       scenario,
-      phone: configuration.phone,
+      recipient: configuration.recipient,
       apiKey: configuration.apiKey,
     });
     await input.writePrivateEvidence(result);
     const summary: PreflightSummary = {
       scenario,
-      maskedPhone: configuration.maskedPhone,
+      maskedPhone: configuration.recipient.maskedPhone,
+      country: configuration.country,
+      language: configuration.language,
       status: result.run.status,
       providerStatus: result.run.providerSnapshot?.status ?? "not_available",
       eventCount: result.events.length,
@@ -395,12 +488,7 @@ async function executeLivePreflight(input: PreflightExecutionInput): Promise<{
         expectedQuantity: 500,
         requiredDeliveryDate: "2026-08-15",
       },
-      recipient: {
-        recipientName: "Consenting participant",
-        phoneE164: input.phone,
-        region: "US",
-        locale: "en-US",
-      },
+      recipient: input.recipient,
     },
   );
   const awaiting = runRecordSchema.parse({

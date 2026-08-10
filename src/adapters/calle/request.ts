@@ -135,8 +135,8 @@ function buildCanonicalCreateCallRequest(input: CreateSupplierCall) {
     recipients: [
       {
         phones: [input.recipient.phoneE164],
-        region: "US",
-        locale: "en-US",
+        region: input.recipient.region,
+        locale: input.recipient.locale,
       },
     ],
     recipient_result_schema: recipientResultSchema,

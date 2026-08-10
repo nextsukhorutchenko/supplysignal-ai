@@ -14,7 +14,7 @@ before any interactive wait. The harness:
 - accepts exactly one scenario: `answered`, `declined`, or `no_answer`;
 - reads the recipient only from the server-side `SUPPLIER_TEST_PHONE`
   environment variable;
-- accepts only a United States E.164 number with `US` and `en-US`;
+- accepts only the approved United States and Kenya profiles listed below;
 - requires an interactive terminal and the exact phrase
   `AUTHORIZE ONE CALL`;
 - uses the existing CALL-E adapter, stored call identifier, and reconciliation
@@ -22,6 +22,18 @@ before any interactive wait. The harness:
 - never retries or redials the create request; and
 - stores private run evidence only below the repository-anchored, ignored
   `tmp/preflight-private/<run-id>/` directory.
+
+| Country       | Strict E.164 pattern | Display mask       | Region | Locale  | Language |
+| ------------- | -------------------- | ------------------ | ------ | ------- | -------- |
+| United States | `^\+1[2-9]\d{9}$`    | `+1 ***-***-1234`  | `US`   | `en-US` | English  |
+| Kenya         | `^\+254[1-9]\d{8}$`  | `+254 ***-**-1234` | `KE`   | `en-KE` | English  |
+
+The harness derives `region` and `locale` from the validated phone number;
+they are not operator inputs. Kenya currently uses an international line
+primarily intended for testing. Before every Kenyan live preflight, perform a
+same-day check that the
+[official CALL-E supported-regions table](https://github.com/CALLE-AI/call-e-integrations#-supported-regions-and-languages)
+still lists `KE + English` as supported.
 
 Do not rerun a scenario to recover from a timeout or an empty CALL-E Dashboard.
 An ambiguous response may still mean that the provider created the call. Keep
@@ -34,8 +46,8 @@ or authorization for an earlier scenario is not sufficient.
 
 Confirm all of the following with the participant:
 
-1. The participant is ready at the agreed time and owns the reviewed US phone
-   number.
+1. The participant is ready at the agreed time and owns the reviewed supported
+   phone number.
 2. The participant consents to the AI-assisted call.
 3. The participant consents to recording for the private preflight.
 4. The participant consents to the separately reviewed excerpt being used in
@@ -65,7 +77,7 @@ files, or chat messages:
 
 ```powershell
 $env:CALLE_API_KEY = Read-Host "CALL-E API key"
-$env:SUPPLIER_TEST_PHONE = Read-Host "Consenting US recipient in E.164 format"
+$env:SUPPLIER_TEST_PHONE = Read-Host "Consenting US or Kenya recipient in strict E.164 format"
 ```
 
 The reviewed runtime contract is CALL-E OpenAPI `0.6.0`. The application uses
@@ -105,8 +117,8 @@ or:
 corepack pnpm tsx scripts/live-preflight.ts --scenario no_answer
 ```
 
-Verify the displayed scenario and masked number. If either is wrong, do not
-authorize. Otherwise type exactly:
+Verify the displayed scenario, country, language, and masked number. If any
+value is wrong, do not authorize. Otherwise type exactly:
 
 ```text
 AUTHORIZE ONE CALL
@@ -114,7 +126,7 @@ AUTHORIZE ONE CALL
 
 The phrase authorizes one create attempt in that process only. A second
 scenario requires a new process, fresh owner authorization, and another review
-of the masked number.
+of the displayed country, language, and masked number.
 
 ## Physical observation record
 
@@ -143,10 +155,10 @@ exact observation-window end time.
 
 ## Evidence handling
 
-The harness prints only a sanitized result with the scenario, masked phone,
-bounded statuses, and event count. Private records may contain a full phone,
-call identifier, transcript, or structured provider result and therefore stay
-under:
+The harness prints only a sanitized result with the scenario, country,
+language, masked phone, bounded statuses, and event count. Private records may
+contain a full phone, call identifier, transcript, or structured provider
+result and therefore stay under:
 
 ```text
 tmp/preflight-private/<run-id>/
@@ -186,8 +198,8 @@ context, and the final pass/fail decision.
   or automate the confirmation phrase.
 - `AUTHORIZATION_REQUIRED`: the exact phrase was not entered. No call was
   attempted.
-- `UNSUPPORTED_RECIPIENT_REGION`: review the number. This vertical slice does
-  not call non-US numbers.
+- `UNSUPPORTED_RECIPIENT_REGION`: review the number. This vertical slice calls
+  only the approved US and Kenya profiles.
 - `CALL_OUTCOME_PENDING`: do not rerun the harness. Preserve private state and
   reconcile or escalate the existing call. This includes bounded polling that
   ended while the call was still active and event pagination that remained

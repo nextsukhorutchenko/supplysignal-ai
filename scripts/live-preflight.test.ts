@@ -22,15 +22,28 @@ import type {
 
 const apiKey = "server-only-test-token";
 const phone = ["+1", "202", "555", "0147"].join("");
+const kenyaPhone = ["+254", "100", "000", "000"].join("");
 const scriptsDirectory = fileURLToPath(new URL(".", import.meta.url));
 const repositoryRoot = resolve(scriptsDirectory, "..");
 const privateRoot = resolve(repositoryRoot, "tmp", "preflight-private");
 
 type PreflightModule = typeof import("./live-preflight.js");
 
-async function freshModule(): Promise<PreflightModule> {
+function resetPreflightModuleContext(): void {
   vi.resetModules();
+  vi.doUnmock("node:process");
+  const isolatedProcess = Object.create(process) as NodeJS.Process;
+  vi.doMock("node:process", () => ({ default: isolatedProcess }));
+}
+
+async function freshModule(): Promise<PreflightModule> {
+  resetPreflightModuleContext();
   return import("./live-preflight.js");
+}
+
+async function queryModule(query: string): Promise<PreflightModule> {
+  const specifier = `./live-preflight.js?${query}`;
+  return (await import(/* @vite-ignore */ specifier)) as PreflightModule;
 }
 
 function terminalRun(input: PreflightExecutionInput): PreflightExecutionResult {
@@ -45,13 +58,7 @@ function terminalRun(input: PreflightExecutionInput): PreflightExecutionResult {
       expectedQuantity: 500,
       requiredDeliveryDate: "2026-08-15",
     },
-    recipient: {
-      recipientName: "Consenting participant",
-      phoneE164: input.phone,
-      maskedPhone: "+1 ***-***-0147",
-      region: "US",
-      locale: "en-US",
-    },
+    recipient: { ...input.recipient },
     schemaValidation: "not_run",
     consistencyValidation: "not_run",
     artifactState: "none",
@@ -121,7 +128,7 @@ type GuardedCliResult = {
 async function runGuardedCli(
   options: GuardedCliOptions = {},
 ): Promise<GuardedCliResult> {
-  vi.resetModules();
+  resetPreflightModuleContext();
   vi.doUnmock("node:crypto");
   vi.doUnmock("node:fs/promises");
   vi.doUnmock("node:readline/promises");
@@ -236,6 +243,7 @@ async function runGuardedCli(
     vi.unstubAllGlobals();
     vi.doUnmock("node:crypto");
     vi.doUnmock("node:fs/promises");
+    vi.doUnmock("node:process");
     vi.doUnmock("node:readline/promises");
     vi.resetModules();
   }
@@ -265,14 +273,23 @@ describe("live CALL-E preflight safety boundary", () => {
     expect(input.execute).not.toHaveBeenCalled();
   });
 
-  it.each(["+442079460123", "+120255501", "+1202555014x"])(
-    "rejects invalid or non-US phone %s before execution",
-    async (invalidPhone) => {
+  it.each([
+    ["unsupported country", ["+44", "20", "7946", "0123"].join("")],
+    ["malformed US length", ["+1", "202", "555", "01"].join("")],
+    ["malformed US extension", ["+1", "202", "555", "0147", "x1"].join("")],
+    ["malformed Kenya zero prefix", ["+254", "000", "000", "000"].join("")],
+    ["malformed Kenya length", ["+254", "100", "000", "00"].join("")],
+    ["malformed Kenya local format", ["07", "00", "000", "000"].join("")],
+  ])(
+    "rejects %s before prompting or execution",
+    async (_case, invalidPhone) => {
       const { createPreflightProcess } = await freshModule();
       const run = createPreflightProcess();
       const writeOutput = vi.fn<(message: string) => void>();
+      const prompt = vi.fn(async () => "AUTHORIZE ONE CALL");
       const input = validInput({
         env: { CALLE_API_KEY: apiKey, SUPPLIER_TEST_PHONE: invalidPhone },
+        prompt,
         writeOutput,
       });
 
@@ -280,6 +297,7 @@ describe("live CALL-E preflight safety boundary", () => {
         code: "UNSUPPORTED_RECIPIENT_REGION",
       });
       expect(input.execute).not.toHaveBeenCalled();
+      expect(prompt).not.toHaveBeenCalled();
       expect(JSON.stringify(writeOutput.mock.calls)).not.toContain(
         invalidPhone,
       );
@@ -385,6 +403,39 @@ describe("live CALL-E preflight safety boundary", () => {
     expect(execute).toHaveBeenCalledTimes(1);
   });
 
+  it("shares one atomic execution permit across distinct ESM module instances", async () => {
+    resetPreflightModuleContext();
+    const firstModule = await queryModule("permit-a");
+    const secondModule = await queryModule("permit-b");
+    let authorize: ((value: string) => void) | undefined;
+    const prompt = vi.fn(
+      async () =>
+        new Promise<string>((resolvePrompt) => {
+          authorize = resolvePrompt;
+        }),
+    );
+    const execute = vi.fn(async (input: PreflightExecutionInput) =>
+      terminalRun(input),
+    );
+    const first = firstModule.createPreflightProcess()(
+      validInput({ prompt, execute }),
+    );
+    const second = secondModule.createPreflightProcess()(
+      validInput({ execute }),
+    );
+    const secondExpectation = expect(second).rejects.toMatchObject({
+      code: "PREFLIGHT_CALL_LIMIT_REACHED",
+    });
+
+    expect(firstModule).not.toBe(secondModule);
+    authorize?.("AUTHORIZE ONE CALL");
+    await expect(first).resolves.toMatchObject({
+      status: "PROVIDER_REPORTED_TERMINAL",
+    });
+    await secondExpectation;
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+
   it("permanently consumes the permit once provider execution begins", async () => {
     const { createPreflightProcess } = await freshModule();
     const execute = vi.fn(async () => Promise.reject(new Error("bounded")));
@@ -409,11 +460,47 @@ describe("live CALL-E preflight safety boundary", () => {
     const output = JSON.stringify(writeOutput.mock.calls);
     expect(output).toContain("answered");
     expect(output).toContain("+1 ***-***-0147");
+    expect(output).toContain("United States");
+    expect(output).toContain("English");
     expect(output).toContain("PROVIDER_REPORTED_TERMINAL");
     expect(output).not.toContain(phone);
     expect(output).not.toContain(apiKey);
     expect(output).not.toContain("call_private_001");
     expect(input.writePrivateEvidence).toHaveBeenCalledTimes(1);
+  });
+
+  it("derives and displays the canonical Kenya English profile", async () => {
+    const { createPreflightProcess } = await freshModule();
+    const run = createPreflightProcess();
+    const execute = vi.fn(async (input: PreflightExecutionInput) =>
+      terminalRun(input),
+    );
+    const writeOutput = vi.fn<(message: string) => void>();
+    const input = validInput({
+      env: { CALLE_API_KEY: apiKey, SUPPLIER_TEST_PHONE: kenyaPhone },
+      execute,
+      writeOutput,
+    });
+
+    await expect(run(input)).resolves.toMatchObject({
+      country: "Kenya",
+      language: "English",
+      maskedPhone: "+254 ***-**-0000",
+    });
+    expect(execute).toHaveBeenCalledWith({
+      scenario: "answered",
+      apiKey,
+      recipient: {
+        recipientName: "Consenting participant",
+        phoneE164: kenyaPhone,
+        maskedPhone: "+254 ***-**-0000",
+        region: "KE",
+        locale: "en-KE",
+      },
+    });
+    expect(JSON.stringify(writeOutput.mock.calls)).not.toContain(kenyaPhone);
+    expect(JSON.stringify(writeOutput.mock.calls)).toContain("Kenya");
+    expect(JSON.stringify(writeOutput.mock.calls)).toContain("English");
   });
 });
 
@@ -503,6 +590,40 @@ describe("actual offline CLI composition", () => {
       process.chdir(originalCwd);
       await removeSession(guardedRunId);
       await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("composes the guarded Kenya request with exactly one local fake POST", async () => {
+    await removeSession(guardedRunId);
+    let postBody: Record<string, unknown> | undefined;
+    const result = await runGuardedCli({
+      apiKey,
+      phone: kenyaPhone,
+      fetchMock: async (url, init) => {
+        if (init?.method === "POST") {
+          postBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+          return jsonResponse(await fixture("create-accepted.json"), 201);
+        }
+        if (String(url).endsWith("/events")) {
+          return jsonResponse(await fixture("events-page.json"));
+        }
+        return jsonResponse(await fixture("completed-valid.json"));
+      },
+    });
+
+    try {
+      expect(result.error).toBeUndefined();
+      expect(
+        result.fetchMock.mock.calls.filter(
+          ([, request]) => request?.method === "POST",
+        ),
+      ).toHaveLength(1);
+      expect(postBody?.recipients).toEqual([
+        { phones: [kenyaPhone], region: "KE", locale: "en-KE" },
+      ]);
+      expect(result.output).not.toContain(kenyaPhone);
+    } finally {
+      await removeSession(guardedRunId);
     }
   });
 

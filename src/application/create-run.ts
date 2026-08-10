@@ -1,6 +1,9 @@
 import { z } from "zod";
 
-import { createCallRecipient } from "../domain/call-recipient.js";
+import {
+  callRecipientSchema,
+  createCallRecipient,
+} from "../domain/call-recipient.js";
 import { AppError } from "../domain/errors.js";
 import { withPlainDataBoundary } from "../domain/plain-data.js";
 import { purchaseOrderSchema } from "../domain/purchase-order.js";
@@ -25,7 +28,10 @@ export async function createRun(
   input: unknown,
 ): Promise<RunRecord> {
   const parsed = createRunInputSchema.parse(input);
-  const recipient = createCallRecipient(parsed.recipient);
+  const canonicalRecipient = callRecipientSchema.safeParse(parsed.recipient);
+  const recipient = canonicalRecipient.success
+    ? canonicalRecipient.data
+    : createCallRecipient(parsed.recipient);
 
   try {
     const timestamp = dependencies.clock.now();
