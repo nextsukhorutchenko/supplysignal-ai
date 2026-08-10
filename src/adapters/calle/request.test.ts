@@ -8,6 +8,7 @@ import {
 } from "./request.js";
 
 const fictionalPhone = ["+1", "202", "555", "0123"].join("");
+const kenyaPhone = ["+254", "100", "000", "000"].join("");
 const input: CreateSupplierCall = {
   runId: "run_001",
   idempotencyKey: "ssai-v1-stable-key",
@@ -23,6 +24,16 @@ const input: CreateSupplierCall = {
     maskedPhone: "+1 ***-***-0123",
     region: "US",
     locale: "en-US",
+  },
+};
+const kenyaInput: CreateSupplierCall = {
+  ...input,
+  recipient: {
+    recipientName: "Consenting participant",
+    phoneE164: kenyaPhone,
+    maskedPhone: "+254 ***-**-0000",
+    region: "KE",
+    locale: "en-KE",
   },
 };
 const mandatoryDisclosure =
@@ -75,6 +86,15 @@ describe("buildCreateCallRequest", () => {
     expect(request).not.toHaveProperty("webhook_url");
     expect(request).not.toHaveProperty("batch");
     expect(request).not.toHaveProperty("calls");
+  });
+
+  it("maps each canonical recipient profile without a US override", () => {
+    expect(buildCreateCallRequest(input).recipients).toEqual([
+      { phones: [fictionalPhone], region: "US", locale: "en-US" },
+    ]);
+    expect(buildCreateCallRequest(kenyaInput).recipients).toEqual([
+      { phones: [kenyaPhone], region: "KE", locale: "en-KE" },
+    ]);
   });
 
   it("uses the exact strict supplier-result contract", () => {
@@ -160,6 +180,19 @@ describe("buildCreateCallRequest", () => {
     ["non-E.164 phone", { phoneE164: "2025550123" }],
     ["unsupported region", { region: "CA" }],
     ["unsupported locale", { locale: "fr-CA" }],
+    [
+      "Kenya phone paired with the US profile",
+      {
+        phoneE164: kenyaPhone,
+        maskedPhone: "+254 ***-**-0000",
+        region: "US",
+        locale: "en-US",
+      },
+    ],
+    [
+      "US phone paired with the Kenya profile",
+      { region: "KE", locale: "en-KE" },
+    ],
   ])("rejects a %s before request construction", (_name, recipientOverride) => {
     expect(() =>
       buildCreateCallRequest({
