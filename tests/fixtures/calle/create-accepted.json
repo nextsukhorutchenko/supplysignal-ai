@@ -1,0 +1,28 @@
+{
+  "id": "call_demo_001",
+  "object": "call_task",
+  "status": "queued",
+  "task": "Confirm the fictional supplier order.",
+  "recipients": [
+    {
+      "id": "rcp_demo_001",
+      "phones": ["<FICTIONAL_E164>"],
+      "locale": "en-US",
+      "region": "US",
+      "status": "pending",
+      "structured_result": null,
+      "summary": null,
+      "attempts": []
+    }
+  ],
+  "structured_result": null,
+  "summary": null,
+  "task_completed": null,
+  "completion_confidence": null,
+  "evidence": [],
+  "metadata": { "workflow_run_id": "run_001" },
+  "failure_code": null,
+  "failure_message": null,
+  "created_at": "2026-08-09T12:00:00.000Z",
+  "completed_at": null
+}

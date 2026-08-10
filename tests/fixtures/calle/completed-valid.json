@@ -1,0 +1,63 @@
+{
+  "id": "call_demo_001",
+  "object": "call_task",
+  "status": "completed",
+  "task": "Confirm the fictional supplier order.",
+  "recipients": [
+    {
+      "id": "rcp_demo_001",
+      "phones": ["<FICTIONAL_E164>"],
+      "locale": "en-US",
+      "region": "US",
+      "status": "completed",
+      "structured_result": {
+        "contact_outcome": "reached",
+        "confirmed_quantity": 500,
+        "available_quantity": 350,
+        "delayed_quantity": 150,
+        "promised_delivery_date": "2026-08-22",
+        "delay_reason": "Component shortage",
+        "follow_up_required": "yes",
+        "unable_to_fulfill": "no"
+      },
+      "summary": "The supplier reported a partial delay.",
+      "attempts": [
+        {
+          "id": "att_demo_001",
+          "phone": "<FICTIONAL_E164>",
+          "status": "completed",
+          "started_at": "2026-08-09T12:00:05.000Z",
+          "completed_at": "2026-08-09T12:02:00.000Z",
+          "summary": "The supplier reported a partial delay.",
+          "transcript_turns": [
+            {
+              "offset_seconds": 0,
+              "speaker": "bot",
+              "text": "How many fictional units are ready now?"
+            },
+            {
+              "offset_seconds": 8,
+              "speaker": "user",
+              "text": "Three hundred fifty are ready and one hundred fifty are delayed."
+            }
+          ],
+          "provider_call_id": "provider_demo_001",
+          "failure_code": null,
+          "failure_message": null
+        }
+      ]
+    }
+  ],
+  "structured_result": null,
+  "summary": "The supplier reported a partial delay.",
+  "task_completed": true,
+  "completion_confidence": { "score": 0.98, "label": "high" },
+  "evidence": [
+    "Three hundred fifty are ready and one hundred fifty are delayed."
+  ],
+  "metadata": { "workflow_run_id": "run_001" },
+  "failure_code": null,
+  "failure_message": null,
+  "created_at": "2026-08-09T12:00:00.000Z",
+  "completed_at": "2026-08-09T12:02:00.000Z"
+}

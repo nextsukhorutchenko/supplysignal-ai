@@ -150,6 +150,99 @@ The application has two explicit runtime modes:
 
 Runs are stored on the local filesystem under a validated root. Private runtime records and sanitized public replay data are separate representations. A committed replay fixture contains only reviewed, non-sensitive data.
 
+### Correction A9 (Approved 2026-08-08)
+
+Task 5 persistence uses immutable version files as its compare-and-swap
+authority. This correction supersedes only the earlier fixed run file and
+lock-file implementation detail; the `RunStore` interface and all other
+approved behavior remain unchanged.
+
+- An exact `<runId>.v<16-digit-version>.json` file is authoritative. Version
+  zero is create; compare-and-swap may publish only `expectedVersion + 1`.
+- Publication writes a unique same-directory file with exclusive creation,
+  writes and syncs it fully, closes it, then creates the final version with an
+  atomic create-only hard link. `EEXIST` is a bounded conflict. Published
+  versions are never replaced or mutated, and temporary files are cleaned on
+  every handled success or failure path.
+- Reads stream the directory and accept no more than 1,024 exact matching
+  version files. History must begin at zero, be strictly contiguous, and have
+  strictly valid records whose IDs and versions match their filenames. A gap,
+  malformed candidate, corruption, ambiguity, or excess candidate fails
+  closed.
+- Lock files and stale-lock recovery are removed from the correctness path.
+- The store establishes a canonical root and derives children only from it.
+  Each candidate is checked before open, opened without following links where
+  the platform supports it, checked through its handle, checked again by path,
+  and accepted only when identity, regular-file status, bounded size, and safe
+  link count remain valid. Symlink, reparse-point, path-swap, and outside-root
+  hard-link candidates fail closed.
+
+### Correction A10 (Approved 2026-08-09)
+
+Task 5 treats the configured persistence root and every parent component as
+application-private; they must not be concurrently writable or relinkable by
+untrusted processes. Owner-only filesystem permissions or ACLs are an operator
+responsibility outside `FileRunStore`. This correction does not claim integrity
+against an actor that already has concurrent write or relink access inside that
+trusted boundary; defending against such an actor, including malicious
+replace-and-restore ABA, requires separately approved external key management
+and authenticated records.
+
+- On first establishment the store pins the root's canonical path and stable
+  device/inode identity. Before and after every create, read, and
+  compare-and-swap operation, and around final publication, it `lstat`s the
+  configured root, rejects symlink/reparse/non-directory state, resolves the
+  real path, and requires the canonical path and identity to match the pin. A
+  persistent root replacement fails with a bounded store error.
+- Before create publishes version zero, the bounded streaming history scan
+  requires no candidate for that run, including exact future versions and
+  malformed `.v` candidates. After publication the store performs the same
+  bounded strict read and requires exactly one valid version-zero record equal
+  to the submitted canonical record.
+- The exclusive temporary file handle remains open after the complete write and
+  sync. Pre-publication handle/path checks require one regular-file identity,
+  stable size/mtime/ctime, and link count one. Atomic create-only hard-link
+  publication is followed by handle and both-path checks requiring the same
+  regular-file identity, stable post-link size/mtime/ctime, and link count two
+  before the handle is closed and the temporary path is cleaned. Any mismatch
+  fails bounded and is never reported as success.
+- A9's immutable exact version files, 1,024-candidate bound, strict validation,
+  lock-free correctness path, accessor/proxy safety, path confinement, and
+  handled-path cleanup remain unchanged.
+
+### Correction A11 (Approved 2026-08-09)
+
+Task 5 uses one atomic, irreversible commit point for immutable version
+publication. This correction supersedes only A9/A10 behavior that treated a
+two-link crash-after-link state as committed. The exact version-file format,
+public APIs, dependencies, and A10 application-private-root trust boundary are
+unchanged.
+
+- A final version inode with `nlink === 2` is always pre-commit and is never
+  authoritative, even when its other link is the matching same-root temporary
+  path. Readers reject it, compare-and-swap cannot publish a descendant, and
+  create cannot overwrite its existing final pathname. Only `nlink === 1` is
+  an authoritative committed version.
+- The writer retains the synchronized temporary handle through hard-link
+  publication and completes all root, handle, path-identity, regular-file,
+  stable-metadata, and two-link checks before closing that handle. It then
+  unlinks the temporary path. Successful temporary unlink is the single commit
+  point because it changes the verified final inode from two links to one.
+- No fallible verification, cleanup, root check, rollback, or other awaited
+  operation follows that successful unlink. A successful create or
+  compare-and-swap returns immediately; A10's relevant successful-write checks
+  are therefore completed before the commit point rather than by a
+  post-publication read or root recheck.
+- Any verification, handle-close, or temporary-unlink failure before commit is
+  a bounded publication failure. The writer may remove the final link it
+  created. If final rollback succeeds, it may clean the temporary path. If
+  final rollback fails, it preserves the temporary link so the surviving final
+  remains at `nlink === 2`, unreadable, and unusable by compare-and-swap.
+- A crash after hard-link creation but before temporary unlink leaves the same
+  fail-closed two-link state. No automatic stale-state recovery is added;
+  operator cleanup inside the application-private root is required. Committed
+  one-link versions remain immutable and are never rolled back.
+
 ## 5. Data flow
 
 The approved primary flow is:
@@ -192,6 +285,7 @@ Provider `task_completed` and `completion_confidence` values are advisory eviden
 
 External failures are mapped to the following bounded error codes before crossing application boundaries:
 
+- `RUN_CREATION_FAILED`;
 - `AUTHORIZATION_REQUIRED`;
 - `UNSUPPORTED_RECIPIENT_REGION`;
 - `CALL_NOT_READY`;
@@ -204,6 +298,21 @@ External failures are mapped to the following bounded error codes before crossin
 - `ARTIFACT_PUBLICATION_FAILED`.
 
 Raw provider errors, tokens, phone numbers, internal prompts, and provider trace envelopes are not returned to the browser or written to public artifacts.
+
+### Correction A8 (Approved 2026-08-08)
+
+`createRun` dependency and internal creation failures use only the bounded
+`RUN_CREATION_FAILED` code and message. Errors from the clock, ID generator,
+and run store must not expose a full phone number, native path, internal detail,
+or copied dependency error. Existing plain-data validation remains authoritative
+for rejected caller input and is not converted into a creation failure.
+
+The validated `RunRecord` passed to `RunStore.create` and the validated
+`RunRecord` returned to the caller must be separate object graphs, including
+their nested order and recipient values. Mutation by a persistence adapter or
+caller must not cross that boundary. This copy isolation prevents a dependency
+or downstream caller from changing the other side's already validated record
+through shared JavaScript object identity.
 
 ## 9. Operator interface
 

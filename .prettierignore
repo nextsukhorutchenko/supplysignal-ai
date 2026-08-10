@@ -1,0 +1,10 @@
+.next/
+docs/superpowers/
+node_modules/
+coverage/
+playwright-report/
+test-results/
+runs/
+tmp/
+pnpm-lock.yaml
+pnpm-workspace.yaml
