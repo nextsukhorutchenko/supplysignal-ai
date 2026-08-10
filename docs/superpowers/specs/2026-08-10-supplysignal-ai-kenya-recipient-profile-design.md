@@ -1,6 +1,6 @@
 # SupplySignal AI Kenya Recipient Profile Amendment
 
-**Status:** Approved design; pending written-spec review
+**Status:** Approved
 
 **Approved by:** Project owner
 
