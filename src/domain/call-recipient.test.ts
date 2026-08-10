@@ -90,6 +90,22 @@ describe("call recipients", () => {
     ).toThrow();
   });
 
+  it.each([
+    ["an unsupported generic phone", ["+44", "155", "555", "1234"].join("")],
+    ["a malformed Kenya phone", ["+254", "000", "000", "000"].join("")],
+  ])("safeParse rejects %s without disclosing it", (_case, phoneE164) => {
+    const result = callRecipientSchema.safeParse({
+      ...validKenyaRecipient,
+      phoneE164,
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(JSON.stringify(result.error)).not.toContain(phoneE164);
+      expect(result.error.message).not.toContain(phoneE164);
+    }
+  });
+
   it.each(["+11155551234", "+44155551234", "+1415555123", "14155551234"])(
     "rejects a phone number outside the approved US E.164 format: %s",
     (phoneE164) => {

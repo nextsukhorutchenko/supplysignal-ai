@@ -50,6 +50,7 @@ const usCallRecipientObjectSchema = z
   })
   .refine(
     (recipient) =>
+      US_E164_PATTERN.test(recipient.phoneE164) &&
       recipient.maskedPhone === maskPhoneNumber(recipient.phoneE164),
     {
       message: "Masked phone must match the phone number",
@@ -67,6 +68,7 @@ const kenyaCallRecipientObjectSchema = z
   })
   .refine(
     (recipient) =>
+      KE_E164_PATTERN.test(recipient.phoneE164) &&
       recipient.maskedPhone === maskPhoneNumber(recipient.phoneE164),
     {
       message: "Masked phone must match the phone number",
