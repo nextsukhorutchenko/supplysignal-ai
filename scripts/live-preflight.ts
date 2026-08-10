@@ -22,7 +22,11 @@ import { createRun } from "../src/application/create-run.js";
 import type { CalleEventPage, Clock } from "../src/application/ports.js";
 import { reconcileRun } from "../src/application/reconcile-run.js";
 import { startRun } from "../src/application/start-run.js";
-import { createCallRecipient } from "../src/domain/call-recipient.js";
+import {
+  createCallRecipient,
+  getCallRecipientPresentation,
+  type CallRecipient,
+} from "../src/domain/call-recipient.js";
 import { AppError } from "../src/domain/errors.js";
 import {
   runRecordSchema,
@@ -48,7 +52,7 @@ export type PreflightScenario = z.infer<typeof scenarioSchema>;
 
 export type PreflightExecutionInput = {
   scenario: PreflightScenario;
-  phone: string;
+  recipient: CallRecipient;
   apiKey: string;
 };
 
@@ -86,6 +90,8 @@ export type PreflightProcessInput = {
 export type PreflightSummary = {
   scenario: PreflightScenario;
   maskedPhone: string;
+  country: "United States" | "Kenya";
+  language: "English";
   status: RunRecord["status"];
   providerStatus: ProviderEvidenceSnapshot["status"] | "not_available";
   eventCount: number;
@@ -116,8 +122,9 @@ function parseScenario(argv: readonly string[]): PreflightScenario {
 
 function requireConfiguration(env: PreflightProcessInput["env"]): {
   apiKey: string;
-  phone: string;
-  maskedPhone: string;
+  recipient: CallRecipient;
+  country: "United States" | "Kenya";
+  language: "English";
 } {
   const apiKey = env.CALLE_API_KEY;
   const phone = env.SUPPLIER_TEST_PHONE;
@@ -131,14 +138,9 @@ function requireConfiguration(env: PreflightProcessInput["env"]): {
     const recipient = createCallRecipient({
       recipientName: "Consenting participant",
       phoneE164: phone,
-      region: "US",
-      locale: "en-US",
     });
-    return {
-      apiKey,
-      phone: recipient.phoneE164,
-      maskedPhone: recipient.maskedPhone,
-    };
+    const presentation = getCallRecipientPresentation(recipient);
+    return { apiKey, recipient, ...presentation };
   } catch {
     fail("UNSUPPORTED_RECIPIENT_REGION");
   }
@@ -160,7 +162,12 @@ export function createPreflightProcess() {
 
     try {
       input.writeOutput(
-        `Scenario: ${scenario}\nRecipient: ${configuration.maskedPhone}`,
+        [
+          `Scenario: ${scenario}`,
+          `Recipient: ${configuration.recipient.maskedPhone}`,
+          `Country: ${configuration.country}`,
+          `Language: ${configuration.language}`,
+        ].join("\n"),
       );
       const confirmation = await input.prompt(`Type ${AUTHORIZATION_PHRASE}: `);
       if (confirmation !== AUTHORIZATION_PHRASE) {
@@ -176,13 +183,15 @@ export function createPreflightProcess() {
     permitState = "consumed";
     const result = await input.execute({
       scenario,
-      phone: configuration.phone,
+      recipient: configuration.recipient,
       apiKey: configuration.apiKey,
     });
     await input.writePrivateEvidence(result);
     const summary: PreflightSummary = {
       scenario,
-      maskedPhone: configuration.maskedPhone,
+      maskedPhone: configuration.recipient.maskedPhone,
+      country: configuration.country,
+      language: configuration.language,
       status: result.run.status,
       providerStatus: result.run.providerSnapshot?.status ?? "not_available",
       eventCount: result.events.length,
@@ -395,12 +404,7 @@ async function executeLivePreflight(input: PreflightExecutionInput): Promise<{
         expectedQuantity: 500,
         requiredDeliveryDate: "2026-08-15",
       },
-      recipient: {
-        recipientName: "Consenting participant",
-        phoneE164: input.phone,
-        region: "US",
-        locale: "en-US",
-      },
+      recipient: input.recipient,
     },
   );
   const awaiting = runRecordSchema.parse({
