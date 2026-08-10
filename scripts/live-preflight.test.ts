@@ -718,6 +718,152 @@ describe("actual offline CLI composition", () => {
     }
   });
 
+  it("rejects link-time mutation after re-reading exact retained-handle bytes", async () => {
+    const session = resolve(privateRoot, guardedRunId);
+    await removeSession(guardedRunId);
+    let mutated = false;
+    const result = await runGuardedCli({
+      apiKey,
+      phone,
+      mockFileSystem: (actual) => ({
+        link: async (temporaryPath, finalPath) => {
+          await actual.link(temporaryPath, finalPath);
+          if (!mutated && String(finalPath).endsWith("result.json")) {
+            await actual.writeFile(finalPath, "mutated-after-link\n", {
+              encoding: "utf8",
+              flag: "w",
+              mode: 0o600,
+            });
+            mutated = true;
+          }
+        },
+      }),
+    });
+
+    try {
+      expect(mutated).toBe(true);
+      expect(result.error).toMatchObject({ code: "CALL_OUTCOME_PENDING" });
+      expect(result.output).not.toContain('"status"');
+      expect(
+        result.fetchMock.mock.calls.filter(
+          ([, request]) => request?.method === "POST",
+        ),
+      ).toHaveLength(1);
+      await expect(readFile(resolve(session, "result.json"))).rejects.toThrow();
+    } finally {
+      await removeSession(guardedRunId);
+    }
+  });
+
+  it.each(["temporary", "final"] as const)(
+    "does not delete a substituted %s pathname during rollback",
+    async (substitutedPath) => {
+      const sentinel = `substituted-${substitutedPath}\n`;
+      await removeSession(guardedRunId);
+      let replacementPath: string | undefined;
+      const result = await runGuardedCli({
+        apiKey,
+        phone,
+        mockFileSystem: (actual) => ({
+          link: async (temporaryPath, finalPath) => {
+            await actual.link(temporaryPath, finalPath);
+            if (!String(finalPath).endsWith("result.json")) {
+              return;
+            }
+            replacementPath = String(
+              substitutedPath === "temporary" ? temporaryPath : finalPath,
+            );
+            await actual.unlink(replacementPath);
+            await actual.writeFile(replacementPath, sentinel, {
+              encoding: "utf8",
+              flag: "wx",
+              mode: 0o600,
+            });
+          },
+        }),
+      });
+
+      try {
+        expect(replacementPath).toBeDefined();
+        expect(result.error).toMatchObject({ code: "CALL_OUTCOME_PENDING" });
+        expect(
+          result.fetchMock.mock.calls.filter(
+            ([, request]) => request?.method === "POST",
+          ),
+        ).toHaveLength(1);
+        expect(await readFile(replacementPath ?? "missing", "utf8")).toBe(
+          sentinel,
+        );
+      } finally {
+        await removeSession(guardedRunId);
+      }
+    },
+  );
+
+  it("performs no fallible filesystem operation after commit unlink succeeds", async () => {
+    await removeSession(guardedRunId);
+    let committed = false;
+    const postCommitOperations: string[] = [];
+    const result = await runGuardedCli({
+      apiKey,
+      phone,
+      mockFileSystem: (actual) => {
+        function afterCommit<T extends unknown[]>(
+          name: string,
+          operation: (...arguments_: T) => unknown,
+        ) {
+          return async (...arguments_: T) => {
+            if (committed) {
+              postCommitOperations.push(name);
+              throw new Error(`fallible ${name} after commit`);
+            }
+            return operation(...arguments_);
+          };
+        }
+        return {
+          lstat: afterCommit(
+            "lstat",
+            actual.lstat.bind(actual),
+          ) as typeof actual.lstat,
+          realpath: afterCommit(
+            "realpath",
+            actual.realpath.bind(actual),
+          ) as typeof actual.realpath,
+          open: afterCommit(
+            "open",
+            actual.open.bind(actual),
+          ) as typeof actual.open,
+          link: afterCommit(
+            "link",
+            actual.link.bind(actual),
+          ) as typeof actual.link,
+          unlink: async (path) => {
+            if (committed) {
+              postCommitOperations.push("unlink");
+              throw new Error("fallible unlink after commit");
+            }
+            await actual.unlink(path);
+            if (
+              String(path).includes(".result-") &&
+              String(path).endsWith(".tmp")
+            ) {
+              committed = true;
+            }
+          },
+        };
+      },
+    });
+
+    try {
+      expect(committed).toBe(true);
+      expect(postCommitOperations).toEqual([]);
+      expect(result.error).toBeUndefined();
+      expect(result.output).toContain('"status":"PROVIDER_REPORTED_TERMINAL"');
+    } finally {
+      await removeSession(guardedRunId);
+    }
+  });
+
   it("keeps private evidence create-only when the final name already exists", async () => {
     const session = resolve(privateRoot, guardedRunId);
     const sentinel = "pre-existing private evidence\n";

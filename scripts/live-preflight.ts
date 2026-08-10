@@ -1,6 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { constants, type BigIntStats } from "node:fs";
-import { link, lstat, mkdir, open, realpath, unlink } from "node:fs/promises";
+import {
+  link,
+  lstat,
+  mkdir,
+  open,
+  realpath,
+  unlink,
+  type FileHandle,
+} from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createInterface } from "node:readline/promises";
@@ -466,6 +474,84 @@ async function executeLivePreflight(input: PreflightExecutionInput): Promise<{
   return { result: { run: current, events }, privateSession };
 }
 
+function sameExactFileState(first: BigIntStats, second: BigIntStats): boolean {
+  return (
+    sameStableMetadata(first, second) &&
+    first.nlink === second.nlink &&
+    first.mode === second.mode
+  );
+}
+
+async function attestExactHandleBytes(
+  handle: FileHandle,
+  expectedBytes: Buffer,
+): Promise<BigIntStats> {
+  const before = await handle.stat({ bigint: true });
+  if (
+    !before.isFile() ||
+    before.size !== BigInt(expectedBytes.length) ||
+    (before.nlink !== 1n && before.nlink !== 2n)
+  ) {
+    fail("CALL_OUTCOME_PENDING");
+  }
+
+  const attestedBytes = Buffer.alloc(expectedBytes.length + 1);
+  let attestedLength = 0;
+  while (attestedLength < attestedBytes.length) {
+    const read = await handle.read(
+      attestedBytes,
+      attestedLength,
+      attestedBytes.length - attestedLength,
+      attestedLength,
+    );
+    if (read.bytesRead === 0) {
+      break;
+    }
+    attestedLength += read.bytesRead;
+  }
+  const after = await handle.stat({ bigint: true });
+  if (
+    attestedLength !== expectedBytes.length ||
+    !attestedBytes.subarray(0, attestedLength).equals(expectedBytes) ||
+    !sameExactFileState(before, after)
+  ) {
+    fail("CALL_OUTCOME_PENDING");
+  }
+  return after;
+}
+
+function requireOwnedPath(
+  pathStats: BigIntStats,
+  ownedStats: BigIntStats,
+  expectedLinks: bigint,
+): void {
+  if (
+    !pathStats.isFile() ||
+    pathStats.isSymbolicLink() ||
+    !sameIdentity(pathStats, ownedStats) ||
+    pathStats.nlink !== expectedLinks
+  ) {
+    fail("CALL_OUTCOME_PENDING");
+  }
+}
+
+async function unlinkFreshOwnedPath(
+  session: PrivateSession,
+  path: string,
+  ownedStats: BigIntStats,
+  expectedLinks: bigint,
+): Promise<boolean> {
+  try {
+    await verifyPrivateSession(session);
+    const pathStats = await lstat(path, { bigint: true });
+    requireOwnedPath(pathStats, ownedStats, expectedLinks);
+    await unlink(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function writePrivateEvidence(
   result: PreflightExecutionResult,
   session: PrivateSession,
@@ -491,9 +577,10 @@ async function writePrivateEvidence(
   requireContained(sessionRoot, temporaryPath);
 
   let handle: Awaited<ReturnType<typeof open>> | undefined;
-  let opened: BigIntStats | undefined;
+  let ownedFile: BigIntStats | undefined;
   let finalLinked = false;
   let commitUnlinkAttempted = false;
+  let handleClosed = false;
   let operationError: unknown;
   try {
     await verifyPrivateSession(session);
@@ -505,29 +592,8 @@ async function writePrivateEvidence(
     await verifyPrivateSession(session);
     await handle.writeFile(serialized, "utf8");
     await handle.sync();
-
-    const attestedBytes = Buffer.alloc(serializedBytes.length + 1);
-    let attestedLength = 0;
-    while (attestedLength < attestedBytes.length) {
-      const read = await handle.read(
-        attestedBytes,
-        attestedLength,
-        attestedBytes.length - attestedLength,
-        attestedLength,
-      );
-      if (read.bytesRead === 0) {
-        break;
-      }
-      attestedLength += read.bytesRead;
-    }
-    if (
-      attestedLength !== serializedBytes.length ||
-      !attestedBytes.subarray(0, attestedLength).equals(serializedBytes)
-    ) {
-      fail("CALL_OUTCOME_PENDING");
-    }
-
-    opened = await handle.stat({ bigint: true });
+    const opened = await attestExactHandleBytes(handle, serializedBytes);
+    ownedFile = opened;
     const temporaryBeforeLink = await lstat(temporaryPath, { bigint: true });
     if (
       !opened.isFile() ||
@@ -546,7 +612,7 @@ async function writePrivateEvidence(
     finalLinked = true;
     await verifyPrivateSession(session);
 
-    const afterLink = await handle.stat({ bigint: true });
+    const afterLink = await attestExactHandleBytes(handle, serializedBytes);
     const temporaryAfterLink = await lstat(temporaryPath, { bigint: true });
     const finalAfterLink = await lstat(finalPath, { bigint: true });
     if (
@@ -559,11 +625,27 @@ async function writePrivateEvidence(
       temporaryAfterLink.nlink !== 2n ||
       finalAfterLink.nlink !== 2n ||
       !sameIdentity(opened, afterLink) ||
+      opened.size !== afterLink.size ||
+      opened.mtimeNs !== afterLink.mtimeNs ||
       !sameStableMetadata(afterLink, temporaryAfterLink) ||
       !sameStableMetadata(afterLink, finalAfterLink)
     ) {
       fail("CALL_OUTCOME_PENDING");
     }
+    ownedFile = afterLink;
+
+    await verifyPrivateSession(session);
+    const beforeCommit = await attestExactHandleBytes(handle, serializedBytes);
+    const temporaryBeforeCommit = await lstat(temporaryPath, { bigint: true });
+    const finalBeforeCommit = await lstat(finalPath, { bigint: true });
+    if (
+      !sameExactFileState(afterLink, beforeCommit) ||
+      !sameExactFileState(beforeCommit, temporaryBeforeCommit) ||
+      !sameExactFileState(beforeCommit, finalBeforeCommit)
+    ) {
+      fail("CALL_OUTCOME_PENDING");
+    }
+    ownedFile = beforeCommit;
   } catch (error: unknown) {
     operationError = error;
   }
@@ -571,6 +653,7 @@ async function writePrivateEvidence(
   if (handle !== undefined) {
     try {
       await handle.close();
+      handleClosed = true;
     } catch (error: unknown) {
       operationError ??= error;
     }
@@ -579,19 +662,23 @@ async function writePrivateEvidence(
   if (operationError === undefined) {
     try {
       await verifyPrivateSession(session);
-      commitUnlinkAttempted = true;
-      await unlink(temporaryPath);
-      await verifyPrivateSession(session);
-      const committed = await lstat(finalPath, { bigint: true });
+      if (ownedFile === undefined) {
+        fail("CALL_OUTCOME_PENDING");
+      }
+      const temporaryImmediatelyBeforeCommit = await lstat(temporaryPath, {
+        bigint: true,
+      });
+      const finalImmediatelyBeforeCommit = await lstat(finalPath, {
+        bigint: true,
+      });
       if (
-        opened === undefined ||
-        !committed.isFile() ||
-        committed.isSymbolicLink() ||
-        committed.nlink !== 1n ||
-        !sameIdentity(opened, committed)
+        !sameExactFileState(ownedFile, temporaryImmediatelyBeforeCommit) ||
+        !sameExactFileState(ownedFile, finalImmediatelyBeforeCommit)
       ) {
         fail("CALL_OUTCOME_PENDING");
       }
+      commitUnlinkAttempted = true;
+      await unlink(temporaryPath);
       return;
     } catch (error: unknown) {
       operationError = error;
@@ -602,31 +689,19 @@ async function writePrivateEvidence(
     fail("CALL_OUTCOME_PENDING");
   }
 
-  let safeToClean = false;
-  try {
-    await verifyPrivateSession(session);
-    safeToClean = true;
-  } catch (error: unknown) {
-    operationError = error;
-  }
-
-  if (safeToClean && finalLinked) {
-    try {
-      await unlink(finalPath);
-      finalLinked = false;
-      await verifyPrivateSession(session);
-    } catch (error: unknown) {
-      operationError = error;
-      safeToClean = false;
-    }
-  }
-  if (safeToClean && !finalLinked) {
-    try {
-      await unlink(temporaryPath);
-    } catch (error: unknown) {
-      if (!isNodeError(error, "ENOENT")) {
-        operationError = error;
+  if (handleClosed && ownedFile !== undefined) {
+    if (finalLinked) {
+      const finalDeleted = await unlinkFreshOwnedPath(
+        session,
+        finalPath,
+        ownedFile,
+        2n,
+      );
+      if (finalDeleted) {
+        await unlinkFreshOwnedPath(session, temporaryPath, ownedFile, 1n);
       }
+    } else {
+      await unlinkFreshOwnedPath(session, temporaryPath, ownedFile, 1n);
     }
   }
   void operationError;

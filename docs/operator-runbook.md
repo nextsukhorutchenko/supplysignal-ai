@@ -158,7 +158,11 @@ and run-store directory identities and re-attests them around private file
 publication. Redirected, symbolic-link, junction, reparse, or replaced path
 components fail bounded. The temporary and final names must resolve to the
 same synchronized regular file before temporary-link removal commits the
-result. The final private result is bounded and create-only.
+result. Immediately before that commit, the harness re-reads the exact bytes
+through the retained file handle and re-attests both path identities, metadata,
+and link counts. Successful temporary-link removal is the final filesystem
+operation; no later validation can turn an authoritative publication into a
+reported failure. The final private result is bounded and create-only.
 
 This protection assumes the repository and ignored private root are controlled
 by this local application account. It detects identity changes observable
@@ -194,7 +198,10 @@ context, and the final pass/fail decision.
   complete. After the process is stopped and the owner confirms the evidence
   may be discarded, verify the exact repository-anchored run directory and
   remove that whole run directory manually. Never use cleanup as authorization
-  to rerun the call.
+  to rerun the call. Automatic rollback removes a path only after a fresh
+  directory and pathname check proves it still references the writer-owned
+  inode; substituted or unverifiable paths are deliberately left for this
+  manual review.
 - Ringing without usable audio, a physical/provider outcome conflict, invented
   transcript or supplier facts, or a delayed duplicate call: stop expansion.
   Preserve private evidence and request an owner-approved design amendment
