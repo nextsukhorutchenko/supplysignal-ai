@@ -1,6 +1,6 @@
 # SupplySignal AI Concise Call Turns — Design Amendment
 
-**Status:** Proposed — product design approved; written specification awaiting owner approval
+**Status:** Approved by the project owner on 2026-08-10
 
 **Date:** 2026-08-10
 
