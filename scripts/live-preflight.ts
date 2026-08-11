@@ -27,6 +27,7 @@ import {
   createCallRecipient,
   getCallRecipientPresentation,
   type CallRecipient,
+  type RecipientLanguage,
 } from "../src/domain/call-recipient.js";
 import { AppError } from "../src/domain/errors.js";
 import {
@@ -91,8 +92,8 @@ export type PreflightProcessInput = {
 export type PreflightSummary = {
   scenario: PreflightScenario;
   maskedPhone: string;
-  country: "United States" | "Kenya";
-  language: "English";
+  country: "United States" | "Kenya" | "Ukraine";
+  language: RecipientLanguage;
   status: RunRecord["status"];
   providerStatus: ProviderEvidenceSnapshot["status"] | "not_available";
   eventCount: number;
@@ -207,8 +208,8 @@ function parseScenario(argv: readonly string[]): PreflightScenario {
 function requireConfiguration(env: PreflightProcessInput["env"]): {
   apiKey: string;
   recipient: CallRecipient;
-  country: "United States" | "Kenya";
-  language: "English";
+  country: "United States" | "Kenya" | "Ukraine";
+  language: RecipientLanguage;
 } {
   const apiKey = env.CALLE_API_KEY;
   const phone = env.SUPPLIER_TEST_PHONE;
