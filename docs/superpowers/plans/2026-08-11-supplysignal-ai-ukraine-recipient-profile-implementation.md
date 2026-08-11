@@ -48,6 +48,12 @@ Next.js `16.3.0`, CALL-E OpenAPI `0.6.0`, PowerShell-compatible verification.
   state machines, OpenAI, risk logic, artifacts, UI, CI, or deployment.
 - Do not push, open a pull request, merge, or place a live call while executing
   this plan. Each external action requires separate owner authorization.
+- Correction A18 permits Task 1 to widen only the compile-time country and
+  language unions in `scripts/live-preflight.ts` so the repository continues to
+  typecheck after the domain presentation contract expands. Task 1 must not add
+  `SUPPLIER_TEST_LANGUAGE`, Ukraine runtime acceptance, a new preflight error,
+  region/locale output, permit changes, provider construction, or network
+  behavior; those remain Task 3 responsibilities.
 - Every task uses TDD: focused RED, minimal GREEN, affected verification,
   precise staging, one cohesive commit, then independent specification and
   quality review before the next task.
@@ -75,6 +81,7 @@ Next.js `16.3.0`, CALL-E OpenAPI `0.6.0`, PowerShell-compatible verification.
 
 - Modify: `src/domain/call-recipient.ts`
 - Modify: `src/domain/call-recipient.test.ts`
+- Modify: `scripts/live-preflight.ts` (Correction A18 compile-time unions only)
 
 **Interfaces:**
 
@@ -105,6 +112,9 @@ export function getCallRecipientPresentation(input: unknown): {
   `phoneE164`, `maskedPhone`, `region`, and `locale`. It does not persist a
   duplicate `language` field; presentation derives language from the exact
   region/locale profile.
+- Correction A18 preserves the current preflight runtime while widening its
+  annotated country and language result types to accept this Task's expanded
+  presentation interface.
 
 - [ ] **Step 1: Add synthetic Ukraine constants and positive tests**
 
@@ -361,7 +371,23 @@ a raw schema error. After the plain-data parse:
 language variants use the same mask. `getCallRecipientPresentation` must select
 the profile using the validated recipient's exact `locale`, not `region` alone.
 
-- [ ] **Step 6: Run focused GREEN and affected domain/application tests**
+- [ ] **Step 6: Apply the Correction A18 compile-time compatibility change**
+
+In `scripts/live-preflight.ts`, import the Task 1 `RecipientLanguage` type and
+widen only these two existing annotations:
+
+```ts
+country: "United States" | "Kenya" | "Ukraine";
+language: RecipientLanguage;
+```
+
+Apply them to the current `PreflightSummary` and `requireConfiguration` return
+type. Do not change `requireConfiguration` logic, environment reads, public
+error codes, sanitized output fields, permit ordering, execution composition,
+provider setup, or filesystem behavior. Ukraine still fails in the current
+preflight because Task 3 has not introduced its mandatory language input.
+
+- [ ] **Step 7: Run focused GREEN and affected domain/application tests**
 
 Run:
 
@@ -378,34 +404,35 @@ Expected: every command exits `0`. The application tests prove canonical
 recipients still persist through the existing A16 branch without changing
 `createRun`.
 
-- [ ] **Step 7: Review, stage, and commit Task 1 only**
+- [ ] **Step 8: Review, stage, and commit Task 1 only**
 
 Inspect:
 
 ```powershell
-git diff -- src/domain/call-recipient.ts src/domain/call-recipient.test.ts
+git diff -- src/domain/call-recipient.ts src/domain/call-recipient.test.ts scripts/live-preflight.ts
 git status --short
 ```
 
-Stage and commit only the two owned files:
+Stage and commit only the three owned files:
 
 ```powershell
-git add -- src/domain/call-recipient.ts src/domain/call-recipient.test.ts
+git add -- src/domain/call-recipient.ts src/domain/call-recipient.test.ts scripts/live-preflight.ts
 git diff --cached --check
-git diff --cached -- src/domain/call-recipient.ts src/domain/call-recipient.test.ts
+git diff --cached -- src/domain/call-recipient.ts src/domain/call-recipient.test.ts scripts/live-preflight.ts
 git commit -m "feat: add Ukraine recipient profiles"
 ```
 
-Expected: one cohesive domain commit. `output/`, `.env.local`, `tmp/`, private
+Expected: one cohesive domain-and-compile-compatibility commit. The preflight
+diff contains annotations only. `output/`, `.env.local`, `tmp/`, private
 evidence, and generated files remain unstaged.
 
-- [ ] **Step 8: Pass Task 1 independent review gate**
+- [ ] **Step 9: Pass Task 1 independent review gate**
 
 Dispatch two fresh read-only reviewers against the Task 1 commit:
 
 1. Specification reviewer: verify the exact regex, masks, four profile pairs,
    explicit Ukraine language, US/KE language prohibition, sanitized errors,
-   and unchanged A16 canonical-recipient behavior.
+   unchanged A16 canonical-recipient behavior, and exact A18 compile-only scope.
 2. Quality reviewer: inspect plain-data/accessor safety, cross-profile totality,
    duplicate-pattern resolution, type narrowing, mutation/alias behavior, test
    boundary quality, and participant-data hygiene.
