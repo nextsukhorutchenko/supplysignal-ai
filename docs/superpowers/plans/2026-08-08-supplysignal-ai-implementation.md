@@ -1650,9 +1650,11 @@ visibly render the literal status `RECONCILING`, expose the exact full bounded
 warning through its accessible status region, and expose an accessible
 10-minute observation checklist. It must assert neither generic success nor a
 confirmed-failure presentation is rendered. A stored-ID component case must
-prove that its timer calls `reconcileExistingCall` only for a stored Developer
-API `call_id`; pair it with the Task 7 application test proving the resulting
-gateway operation is GET-only.
+prove that its timer calls `reconcileExistingCall(run.id)` only when a stored
+Developer API `call_id` enables it; the browser must not submit or control the
+`call_id`. The run-ID-scoped server route must read and strictly validate the
+persisted `call_id` before GET-only provider reconciliation. Pair this with the
+Task 7 application test proving the resulting gateway operation is GET-only.
 
 The recovery panel must display masked recipient, canonical profile,
 approximate UTC attempt time, the 10-minute checklist, and the Billing-reference
@@ -1715,10 +1717,7 @@ processing** never claims to cancel an active call.
 ```tsx
 useEffect(() => {
   if (!RECONCILABLE_STATUSES.includes(run.status) || !run.callId) return;
-  const timer = window.setInterval(
-    () => void reconcileExistingCall(run.id, run.callId),
-    2_000,
-  );
+  const timer = window.setInterval(() => void reconcileExistingCall(run.id), 2_000);
   return () => window.clearInterval(timer);
 }, [run.callId, run.id, run.status]);
 ```
