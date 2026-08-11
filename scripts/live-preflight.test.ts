@@ -125,6 +125,7 @@ type GuardedCliResult = {
   error: unknown;
   output: string;
   fetchMock: ReturnType<typeof vi.fn<typeof fetch>>;
+  promptMock: ReturnType<typeof vi.fn>;
 };
 
 async function runGuardedCli(
@@ -142,9 +143,10 @@ async function runGuardedCli(
       randomUUID: vi.fn(() => uuids.shift() ?? temporaryUuid),
     };
   });
+  const promptMock = vi.fn(async () => options.phrase ?? "AUTHORIZE ONE CALL");
   vi.doMock("node:readline/promises", () => ({
     createInterface: () => ({
-      question: vi.fn(async () => options.phrase ?? "AUTHORIZE ONE CALL"),
+      question: promptMock,
       close: vi.fn(),
     }),
   }));
@@ -260,7 +262,7 @@ async function runGuardedCli(
     vi.doUnmock("node:readline/promises");
     vi.resetModules();
   }
-  return { error, output: output.join(""), fetchMock };
+  return { error, output: output.join(""), fetchMock, promptMock };
 }
 
 describe("live CALL-E preflight safety boundary", () => {
@@ -645,6 +647,39 @@ describe("actual offline CLI composition", () => {
     expect(result.fetchMock).not.toHaveBeenCalled();
     await expect(readdir(resolve(privateRoot, guardedRunId))).rejects.toThrow();
   });
+
+  it.each([
+    ["wrong national length", ["+380", "100", "000", "00"].join("")],
+    ["leading national zero", ["+380", "000", "000", "000"].join("")],
+    ["whitespace", ["+380", "100", " 000", "000"].join("")],
+    ["separator", ["+380", "100", "-000", "000"].join("")],
+    ["local format", ["0", "100", "000", "000"].join("")],
+  ] as const)(
+    "rejects malformed Ukraine %s before prompting, provider execution, or evidence",
+    async (_case, invalidPhone) => {
+      await removeSession(guardedRunId);
+      const result = await runGuardedCli({
+        apiKey,
+        phone: invalidPhone,
+        language: "English",
+      });
+
+      expect(result.error).toMatchObject({
+        code: "UNSUPPORTED_RECIPIENT_REGION",
+      });
+      expect(result.promptMock).not.toHaveBeenCalled();
+      expect(result.fetchMock).not.toHaveBeenCalled();
+      expect(
+        result.fetchMock.mock.calls.filter(
+          ([, request]) => request?.method === "POST",
+        ),
+      ).toHaveLength(0);
+      expect(result.output).not.toContain(invalidPhone);
+      await expect(
+        readdir(resolve(privateRoot, guardedRunId)),
+      ).rejects.toThrow();
+    },
+  );
 
   it.each([
     {
