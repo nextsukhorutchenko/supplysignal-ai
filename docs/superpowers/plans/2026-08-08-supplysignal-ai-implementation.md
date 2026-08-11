@@ -83,7 +83,7 @@
 
 - `app/api/runs/route.ts` — create and read runs.
 - `app/api/runs/[runId]/authorize/route.ts` — one-call authorization.
-- `app/api/runs/[runId]/start/route.ts` — start or safely resume call creation.
+- `app/api/runs/[runId]/start/route.ts` — atomically claim the only call-creation attempt; later no-ID states require manual recovery.
 - `app/api/runs/[runId]/reconcile/route.ts` — poll existing call.
 - `app/api/runs/[runId]/confirm/route.ts` — human confirmation or conflict.
 - `app/api/runs/[runId]/complete/route.ts` — publish the reviewed package.
@@ -1052,12 +1052,14 @@ git commit -m "feat: add strict CALL-E REST adapter"
 Cover missing authorization, two simultaneous starts, create timeout before call ID, process restart with `CALL_STARTING`, stable idempotency key reuse, byte-equivalent request digest, idempotency conflict without key replacement, existing call ID, unknown provider status, and terminal provider completion.
 
 ```ts
-it("reuses the original key after an ambiguous create timeout", async () => {
+it("never retries create after an ambiguous outcome", async () => {
   await expect(startRun(deps, runId)).rejects.toMatchObject({
     code: "CALL_OUTCOME_PENDING",
   });
-  await startRun(deps, runId);
-  expect(calle.createKeys).toEqual([expectedKey, expectedKey]);
+  await expect(startRun(deps, runId)).rejects.toMatchObject({
+    code: "CALL_OUTCOME_PENDING",
+  });
+  expect(calle.createKeys).toEqual([expectedKey]);
 });
 ```
 
@@ -1097,7 +1099,11 @@ export function deriveCallIdempotencyKey(input: {
 
 - [ ] **Step 4: Implement reconciliation**
 
-Poll only the stored `call_id`; when the ID is not yet known, safely repeat create with the same request and idempotency key to recover the original provider resource. Map provider `completed` to `PROVIDER_REPORTED_TERMINAL`, not application completion.
+Poll only a stored Developer API `call_id`. Without a stored ID,
+`CALL_STARTING` and `RECONCILING` return bounded `CALL_OUTCOME_PENDING` for
+manual resolution and perform no provider request. Never repeat create after
+the claim-owning invocation ends. Map provider `completed` to
+`PROVIDER_REPORTED_TERMINAL`, not application completion.
 
 ```ts
 const PROVIDER_STATUS: Readonly<Record<string, RunStatus>> = {
@@ -1206,6 +1212,13 @@ Expected: one call; no fabricated conversation, no false supplier facts, and no 
 
 Continue only if all three provider outcomes match physical observation and no delayed duplicate call occurs. If any outcome is fabricated or materially inconsistent, record the sanitized discrepancy, stop this plan, and return to an owner-approved design amendment.
 
+An ambiguous create without a Developer API `call_id` is incident evidence,
+not a successful scenario. Apply the runbook's 10-minute observation window,
+preserve the unresolved run, record only the sanitized observation, and stop
+before Task 9. A ring, conversation, Billing charge, Dashboard record, or
+support ticket cannot substitute for the authoritative `call_id` and terminal
+GET resource.
+
 - [ ] **Step 11: Write and commit the sanitized preflight evidence**
 
 Record date, application commit, OpenAPI version, scenario outcomes, call-ID hashes, timings, observed-versus-reported comparison, and the explicit pass/fail decision. Exclude the phone, participant identity, raw transcript, and consent evidence.
@@ -1215,6 +1228,10 @@ treat that field as informational only. A missing Dashboard entry must never
 justify a second call. Record ringing-without-audio as a separate discrepancy
 and stop expansion until it is understood or explicitly accepted by an
 owner-approved amendment.
+
+Do not mark the Ukrainian observation or any other no-ID call as passing. Keep
+the hard stop before Task 9 until an authoritative `call_id` and terminal GET
+resource support a separately authorized preflight.
 
 ```bash
 git add docs/verification/call-e-preflight.md
@@ -1608,7 +1625,27 @@ git commit -m "feat: expose mode-safe operator routes"
 
 - [ ] **Step 1: Write failing component tests for the approved workflow**
 
-Test Northstar defaults, masked phone display, `US` and `English`, exact call questions, all consent confirmations, disabled authorization until all checks pass, one-call label, progress states, `Stop future processing`, conflict and correction forms, deterministic risk, trust status, and four artifact links.
+Test Northstar defaults, masked phone display, `US` and `English`, exact call questions, all consent confirmations, disabled authorization until all checks pass, one-call label, progress states, `Stop future processing`, conflict and correction forms, deterministic risk, trust status, and four artifact links. For no-ID `RECONCILING`, require:
+
+```tsx
+expect(screen.getByText("Call response timed out")).toBeVisible();
+expect(
+  screen.getByText(/The call may still occur even though no Developer API call ID was received/),
+).toBeVisible();
+expect(screen.getByText("Developer API call ID: Not received")).toBeVisible();
+expect(screen.queryByRole("button", { name: /retry|redial|start another call/i })).not.toBeInTheDocument();
+expect(reconcileExistingCall).not.toHaveBeenCalled();
+```
+
+The recovery panel must display masked recipient, canonical profile,
+approximate UTC attempt time, the 10-minute checklist, and the Billing-reference
+explanation. Its only actions are **View recovery instructions**, **Record
+observation**, **Copy sanitized support summary**, and **Stop future
+processing**. These labels establish the future UI contract but do not
+authorize a new write route or persistence field. If Task 13 begins without an
+approved bounded port for recording the observation, stop and obtain a narrow
+runtime amendment instead of inventing storage or overloading human
+confirmation.
 
 - [ ] **Step 2: Run and observe expected failures**
 
@@ -1633,7 +1670,26 @@ Use accessible labels and validation. Explain that the application places one AI
 
 - [ ] **Step 4: Implement Live Run and Human Confirmation**
 
-Poll reconciliation with one browser timer that never invokes call creation. Render bounded sanitized events, a masked call ID, provider-reported status as advisory, extracted answers with evidence, consistency warnings, correction fields, and explicit confirm/conflict actions.
+Poll reconciliation with one browser timer that never invokes call creation.
+Render bounded sanitized events, a masked call ID, provider-reported status as
+advisory, extracted answers with evidence, consistency warnings, correction
+fields, and explicit confirm/conflict actions. For no-ID `RECONCILING`, render
+the exact bounded recovery copy:
+
+```tsx
+<section aria-labelledby="call-recovery-heading" role="status">
+  <h2 id="call-recovery-heading">Call response timed out</h2>
+  <p>
+    The call may still occur even though no Developer API call ID was received.
+    Do not start another call. Monitor the recipient phone and CALL-E Billing
+    for 10 minutes, then follow the recovery instructions.
+  </p>
+</section>
+```
+
+Refresh and restart preserve this unresolved presentation. No-ID reconciliation
+starts no browser timer and performs no provider call. **Stop future
+processing** never claims to cancel an active call.
 
 ```tsx
 useEffect(() => {
@@ -1774,7 +1830,28 @@ Exercise all five stages: create `PO-2048`, review plan, check approval boxes, a
 
 - [ ] **Step 2: Write failing negative E2E**
 
-Cover duplicate start clicks, refresh during `CALL_STARTING`, conflict declaration, invalid provider result, incomplete evidence, and failure to publish an incomplete package.
+Cover duplicate start clicks, refresh during `CALL_STARTING`, conflict declaration, invalid provider result, incomplete evidence, and failure to publish an incomplete package. Also cover the no-ID recovery state:
+
+```ts
+test("preserves an ambiguous call without offering another call", async ({ page }) => {
+  const reconcileRequests: string[] = [];
+  await page.route("**/api/runs/*/reconcile", async (route) => {
+    reconcileRequests.push(route.request().url());
+    await route.abort();
+  });
+  await seedRun({ status: "RECONCILING", callId: undefined });
+  await page.goto("/");
+  await expect(page.getByText("Call response timed out")).toBeVisible();
+  await expect(page.getByText("Developer API call ID: Not received")).toBeVisible();
+  await expect(page.getByRole("button", { name: /retry|redial|start another call/i })).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByText("Call response timed out")).toBeVisible();
+  expect(reconcileRequests).toEqual([]);
+});
+```
+
+Require the copied support summary to exclude full phone, credential, full
+Billing reference, native path, raw provider data, and participant identity.
 
 - [ ] **Step 3: Write failing replay E2E**
 
