@@ -214,16 +214,33 @@ $files = @(
   'docs/operator-runbook.md',
   'docs/research/2026-08-11-call-e-ambiguous-create-observation.md'
 )
-rg -n "(sk-[A-Za-z0-9_-]+|Bearer\s+\S+|\+380[0-9]{9}|\+254[0-9]{9}|\+1[0-9]{10}|\b[A-Fa-f0-9]{32}\b|[A-Za-z]:\\)" $files
+$privacyPatterns = @(
+  '(?<![A-Za-z0-9])(?:sk-[A-Za-z0-9_-]{20,}|(?:ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]{20,}|Bearer\s+[A-Za-z0-9._~+/=-]{20,})(?![A-Za-z0-9])',
+  '(?<![0-9])(?:\+1[2-9][0-9]{9}|\+254[1-9][0-9]{8}|\+380[1-9][0-9]{8})(?![0-9])',
+  '(?<![A-Fa-f0-9])[A-Fa-f0-9]{32}(?![A-Fa-f0-9])',
+  '(?<![A-Za-z0-9])[A-Za-z]:\\(?:[^\\/:*?"<>|\r\n]+\\)*[^\\/:*?"<>|\r\n]*'
+)
+$privacyMatches = Select-String -Path $files -Pattern $privacyPatterns
+if ($privacyMatches) {
+  $privacyMatches | ForEach-Object {
+    "$($_.Path):$($_.LineNumber): sensitive literal detected"
+  }
+  exit 1
+}
+Write-Output 'Privacy scan: no sensitive literals detected.'
 rg -n "retry|redial|repeat create|new idempotency" $files
 git diff -- $files
 git status --short
 ```
 
-Expected: the sensitive-pattern scan returns no matches; every retry-related
-match is an explicit prohibition; the working diff contains only the two
-authorized documentation files. The already committed specification and plan
-remain separate documentation-only commits in branch history.
+Expected: the precise sensitive-literal scan exits `0` and prints its explicit
+zero-match result. It detects plausible long credential tokens, actual full
+United States/Kenya/Ukraine phone literals, exact 32-hex Billing-like
+references, and literal native Windows paths without treating documented
+Bearer placeholders or ordinary hyphenated prose as secrets. Every
+retry-related match is an explicit prohibition; the working diff contains only
+the two authorized documentation files. The already committed specification
+and plan remain separate documentation-only commits in branch history.
 
 - [ ] **Step 6: Commit the operator documentation**
 
@@ -243,10 +260,9 @@ procedure contains no action capable of producing another call.
 ### Task 2: Correct the main plan and bind the future UI
 
 **Files:**
-- Modify: `docs/superpowers/plans/2026-08-08-supplysignal-ai-implementation.md:86`
-- Modify: `docs/superpowers/plans/2026-08-08-supplysignal-ai-implementation.md:1050-1125`
-- Modify: `docs/superpowers/plans/2026-08-08-supplysignal-ai-implementation.md:1129-1224`
-- Modify: `docs/superpowers/plans/2026-08-08-supplysignal-ai-implementation.md:1587-1655`
+- Modify:
+  `docs/superpowers/plans/2026-08-08-supplysignal-ai-implementation.md`
+  global constraints, Tasks 2, 6-8, 12-13, 15, 17, and traceability.
 
 **Interfaces:**
 - Consumes: Amendment A20, Correction A12.1, the current Task 7 runtime, and
@@ -287,8 +303,17 @@ the claim-owning invocation ends. Map provider `completed` to
 `PROVIDER_REPORTED_TERMINAL`, not application completion.
 ```
 
-Preserve the stable key and request digest as evidence, but do not describe
-their reuse as permission for another POST.
+Preserve stable-key persistence and request-digest identity verification as
+evidence, but do not describe key reuse as permission for another POST. Require
+an explicit assertion that each run invokes the create gateway at most once;
+recording only one distinct key is not sufficient.
+
+Task 7 exposes only `startRun(deps, runId)` and
+`reconcileRun(deps, runId)`. Do not invent a Billing-reference or `call_id`
+submission input at that application boundary. Its tests cover only
+persisted/provider-returned identity provenance, zero create/GET operations for
+no-ID states, and GET-only reconciliation of the stored Developer API
+`call_id`.
 
 - [ ] **Step 2: Bind Task 8 and Task 9 to the incident classification**
 
@@ -305,6 +330,17 @@ GET resource.
 
 Keep the existing hard gate before Task 9. Do not mark the Ukrainian
 observation or any other no-ID call as passing.
+
+Also correct the main plan's obsolete US-only instructions. Provider requests,
+the guarded preflight, and future UI derive the exact recipient from
+`createCallRecipient` and `callRecipientSchema` in
+`src/domain/call-recipient.ts`. Keep `US/en-US` only as the fictional Northstar
+default, reject unsupported or malformed profiles rather than all non-US
+numbers, and do not broaden the existing United States, Kenya, and Ukraine
+allowlist. Task 13 confirmation copy verifies that the reviewed phone, country,
+language, region, and locale match one canonical supported profile. Update the
+traceability row to cover canonical supported profiles rather than only
+`US/en-US`.
 
 - [ ] **Step 3: Add the no-ID `RECONCILING` contract to Task 13**
 
@@ -330,6 +366,13 @@ These labels establish the future UI contract but do not authorize a new write
 route or persistence field. If Task 13 begins without an approved bounded port
 for recording the observation, stop and obtain a narrow runtime amendment
 instead of inventing storage or overloading human confirmation.
+
+Bind provider-identity rejection to Task 12's existing run-ID-scoped reconcile
+route. Its strict HTTP tests must reject a body containing `callId`,
+`billingReference`, or any other unknown field before application composition
+or gateway access. The server loads and strictly validates only the persisted
+Developer API `call_id`. Task 13 exposes no matching input and sends neither
+field; do not add a runtime schema, route, or storage field.
 
 Expand Task 13 Step 4 with the exact bounded copy:
 
@@ -372,6 +415,9 @@ test("preserves an ambiguous call without offering another call", async ({ page 
 
 Also require the copied support summary to exclude full phone, credential, full
 Billing reference, native path, raw provider data, and participant identity.
+Assert that every browser reconcile request is run-ID-scoped and contains
+neither `callId` nor `billingReference`; Task 12 owns the direct unknown-field
+rejection and zero-gateway-operation proof.
 
 - [ ] **Step 5: Prove the plan no longer contradicts the runtime**
 
@@ -379,15 +425,16 @@ Run:
 
 ```powershell
 $plan = 'docs/superpowers/plans/2026-08-08-supplysignal-ai-implementation.md'
-rg -n "safely resume call creation|safely repeat create|reuses the original key after an ambiguous|createKeys.*expectedKey.*expectedKey" $plan
-rg -n "no provider request|manual resolution|Call response timed out|Developer API call ID: Not received|10-minute|Task 9" $plan
+rg -n "safely resume call creation|safely repeat create|reuses the original key after an ambiguous|stable idempotency key reuse|at most one distinct idempotency key|non-US number|usPhoneSchema|The reviewed number is in the United States|Reject an attempted Billing reference submission" $plan
+rg -n "canonical supported profile|createCallRecipient|callRecipientSchema|run-ID-scoped|unknown field|no provider request|manual resolution|Call response timed out|Developer API call ID: Not received|10-minute|Task 9|at most once" $plan
 corepack pnpm exec prettier --check $plan
 git diff --check
 ```
 
 Expected: the obsolete-instruction search returns no matches; the required
-contract search finds Task 7, Task 8/9, Task 13, and Task 15 coverage; formatting
-and diff checks exit `0`.
+contract search finds canonical profile composition, the Task 7 one-create
+boundary, the Task 8/9 hard stop, Task 12 unknown-field rejection, and Task
+13/15 UI coverage; formatting and diff checks exit `0`.
 
 - [ ] **Step 6: Run the final documentation and privacy gates**
 
@@ -405,25 +452,54 @@ corepack pnpm exec prettier --check $files
 git diff --check
 $markers = @('T' + 'BD', 'T' + 'ODO', 'FIX' + 'ME', 'implement' + ' later', 'fill in' + ' details')
 Select-String -Path $files -Pattern $markers
-rg -n "(sk-[A-Za-z0-9_-]+|Bearer\s+\S+|\+380[0-9]{9}|\+254[0-9]{9}|\+1[0-9]{10}|\b[A-Fa-f0-9]{32}\b|[A-Za-z]:\\)" $files
 $base = git merge-base main HEAD
+$addedLines = git diff --unified=0 --no-color "$base" -- $files |
+  Where-Object { $_ -match '^\+(?!\+\+\+)' } |
+  ForEach-Object { $_.Substring(1) }
+$privacyPatterns = @(
+  '(?<![A-Za-z0-9])(?:sk-[A-Za-z0-9_-]{20,}|(?:ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]{20,}|Bearer\s+[A-Za-z0-9._~+/=-]{20,})(?![A-Za-z0-9])',
+  '(?<![0-9])(?:\+1[2-9][0-9]{9}|\+254[1-9][0-9]{8}|\+380[1-9][0-9]{8})(?![0-9])',
+  '(?<![A-Fa-f0-9])[A-Fa-f0-9]{32}(?![A-Fa-f0-9])',
+  '(?<![A-Za-z0-9])[A-Za-z]:\\(?:[^\\/:*?"<>|\r\n]+\\)*[^\\/:*?"<>|\r\n]*'
+)
+$privacyMatches = $addedLines | Select-String -Pattern $privacyPatterns
+if ($privacyMatches) {
+  $privacyMatches | ForEach-Object {
+    "Added line $($_.LineNumber): sensitive literal detected"
+  }
+  exit 1
+}
+Write-Output 'Privacy scan: no sensitive added literals detected.'
+if (Test-Path 'scripts/scan-secrets.mjs') {
+  corepack pnpm scan:secrets
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+} else {
+  Write-Output 'Repository secret scanner unavailable: scripts/scan-secrets.mjs is planned in Task 16 but is not present; the addition-only privacy scan above is the executed gate.'
+}
 git diff --name-only "$base..HEAD"
 git status --short
 ```
 
-Expected: format and diff checks exit `0`; placeholder and sensitive-pattern
-searches return no matches; the branch contains documentation only. The exact
-diff may contain the specification, this plan, runbook, research observation,
-and corrected main plan—no runtime, test, configuration, dependency, or secret
-file.
+Expected: format and diff checks exit `0`; the placeholder search returns no
+matches; and the executable addition-only privacy scan prints a true zero-match
+result for plausible long credential tokens, actual full supported-country
+phone literals, exact 32-hex Billing-like references, and literal native
+Windows paths. It does not match its own pattern text, documented placeholders
+such as `Bearer <server-only key>` and ``Bearer ${apiKey}``, or ordinary
+hyphenated words. If `scripts/scan-secrets.mjs` is absent because Task 16 has
+not been implemented, report that unavailability exactly as printed and do not
+describe the repository scanner as passing. The branch contains documentation
+only. The exact diff may contain the specification, this plan, runbook,
+research observation, and corrected main plan—no runtime, test, configuration,
+dependency, or secret file.
 
-- [ ] **Step 7: Commit the corrected main plan**
+- [ ] **Step 7: Commit the corrected plans**
 
 ```powershell
-git add -- docs/superpowers/plans/2026-08-08-supplysignal-ai-implementation.md
+git add -- docs/superpowers/plans/2026-08-08-supplysignal-ai-implementation.md docs/superpowers/plans/2026-08-12-supplysignal-ai-ambiguous-create-incident-recovery-implementation.md
 git diff --cached --check
 git diff --cached --stat
-git commit -m "docs: require safe reconciling UI"
+git commit -m "docs: reconcile incident recovery plans"
 ```
 
 **Review gate:** A specification reviewer must confirm every Amendment A20
@@ -445,11 +521,16 @@ The documentation implementation is complete only when:
 3. The future Task 13 and Task 15 requirements contain the exact recovery copy,
    safe actions, forbidden actions, zero-provider-operation assertion, refresh
    behavior, and sanitized support-summary boundary.
-4. All applicable formatting, diff, placeholder, contradiction, privacy, and
+4. Provider requests, preflight, consent UI, and traceability use the exact
+   canonical recipient profiles, with Northstar's `US/en-US` retained only as
+   its fictional default.
+5. Task 7 proves at most one create invocation per run, while Task 12 owns
+   strict reconcile-body rejection before composition or gateway access.
+6. All applicable formatting, diff, placeholder, contradiction, privacy, and
    status checks pass truthfully.
-5. Both independent read-only reviews pass with no unresolved Critical or
+7. Both independent read-only reviews pass with no unresolved Critical or
    Important findings.
-6. No live CALL-E, phone, credential, browser, provider lookup, push,
+8. No live CALL-E, phone, credential, browser, provider lookup, push,
    deployment, or publication action occurred.
 
 After completion, Task 9 remains blocked. A future live preflight requires

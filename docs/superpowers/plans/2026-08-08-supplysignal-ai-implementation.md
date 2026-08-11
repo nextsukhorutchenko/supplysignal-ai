@@ -13,7 +13,11 @@
 - The approved specification at `docs/superpowers/specs/2026-08-08-supplysignal-ai-design.md` is product authority.
 - Keep one `pnpm` TypeScript package; do not introduce a monorepo.
 - Use CALL-E Developer REST API OpenAPI `0.6.0` only through `POST /v1/calls`, `GET /v1/calls/{call_id}`, and `GET /v1/calls/{call_id}/events`.
-- Use one E.164 recipient with `region: "US"` and `locale: "en-US"`.
+- Create and validate the one E.164 recipient through the canonical profile
+  allowlist in `src/domain/call-recipient.ts`. Keep `US/en-US` as the fictional
+  Northstar default, but support only the exact United States, Kenya, and
+  Ukraine country/language profiles defined there; never infer or add a
+  fallback profile.
 - Use a stable run-derived `Idempotency-Key`; never generate a replacement key after an ambiguous create result.
 - Do not use CALL-E webhooks, batch calls, application-level redialing, or automatic retries that can create another call.
 - Treat CALL-E, OpenAI, transcript, evidence, metadata, and persisted external content as untrusted.
@@ -282,13 +286,7 @@ export type PurchaseOrder = {
   requiredDeliveryDate: string;
 };
 
-export type CallRecipient = {
-  recipientName: string;
-  phoneE164: string;
-  maskedPhone: string;
-  region: "US";
-  locale: "en-US";
-};
+export type CallRecipient = z.infer<typeof callRecipientSchema>;
 
 export type SupplierResponse = {
   contactOutcome: "reached" | "declined" | "no_answer" | "unknown";
@@ -309,7 +307,13 @@ export type SupplyRisk = {
 
 - [ ] **Step 1: Write failing validation and risk tests**
 
-Cover positive and negative quantities, ISO date-only strings, overlong text, US E.164 phone validation, exact `US`/`en-US`, deterministic phone masking, recipient-name bounds, `availableQuantity + delayedQuantity === confirmedQuantity`, no-answer, refusal, zero availability, partial quantity, late date, required follow-up, and on-time complete delivery.
+Cover positive and negative quantities, ISO date-only strings, overlong text,
+every canonical recipient profile in `src/domain/call-recipient.ts`, malformed
+and unsupported profiles, cross-profile mismatches, deterministic phone
+masking, recipient-name bounds,
+`availableQuantity + delayedQuantity === confirmedQuantity`, no-answer,
+refusal, zero availability, partial quantity, late date, required follow-up,
+and on-time complete delivery.
 
 ```ts
 it("marks the approved demo scenario AT_RISK", () => {
@@ -371,16 +375,27 @@ export function assessSupplyRisk(
 }
 ```
 
-Define the recipient and bounded error contracts explicitly:
+Define the recipient and bounded error contracts explicitly. The canonical
+recipient module composes exact United States, Kenya, Ukraine-English, and
+Ukraine-Ukrainian object schemas; `createCallRecipient` derives the profile,
+and `callRecipientSchema` strictly validates the complete persisted value. Do
+not duplicate a US-only schema at an application or adapter boundary:
 
 ```ts
-export const callRecipientSchema = z.strictObject({
-  recipientName: z.string().trim().min(1).max(120),
-  phoneE164: z.string().regex(/^\+1[2-9]\d{9}$/),
-  maskedPhone: z.string().regex(/^\+1 \*\*\*-\*\*\*-\d{4}$/),
-  region: z.literal("US"),
-  locale: z.literal("en-US"),
-});
+export const callRecipientSchema = withPlainDataBoundary(
+  z.union([
+    usCallRecipientObjectSchema,
+    kenyaCallRecipientObjectSchema,
+    ukraineEnglishCallRecipientObjectSchema,
+    ukraineUkrainianCallRecipientObjectSchema,
+  ]),
+);
+
+export type CallRecipient = z.infer<typeof callRecipientSchema>;
+
+const recipient = callRecipientSchema.parse(
+  createCallRecipient({ recipientName, phoneE164, language }),
+);
 
 export const APP_ERROR_CODES = [
   "AUTHORIZATION_REQUIRED",
@@ -939,7 +954,11 @@ a reason to redial. See
 
 - [ ] **Step 1: Write failing request tests**
 
-Assert one recipient only, `US`, `en-US`, E.164 validation, `additionalProperties: false`, all required supplier fields, no `webhook_url`, no batch fields, sanitized metadata, and a stable idempotency header.
+Assert one recipient only, exact canonical `region` and `locale` propagation for
+every supported recipient profile, rejection of malformed, unsupported, and
+cross-profile input before `fetch`, `additionalProperties: false`, all required
+supplier fields, no `webhook_url`, no batch fields, sanitized metadata, and a
+stable idempotency header.
 
 - [ ] **Step 2: Write failing response and status-mapping tests**
 
@@ -982,18 +1001,23 @@ export const recipientResultSchema = {
 } as const;
 
 export function buildCreateCallRequest(input: CreateSupplierCall) {
+  const canonical = createSupplierCallSchema.parse(input);
   return {
     task: [
       "You are SupplySignal AI, an automated calling agent.",
       "Immediately disclose that this is an AI-assisted fictional supplier demo and that the call may be recorded for an approved hackathon demonstration.",
-      `Ask about fictional purchase order ${input.order.purchaseOrderRef} from ${input.order.supplierName}.`,
-      `Confirm the quantity expected (${input.order.expectedQuantity}), quantity ready now, quantity delayed, and promised delivery date relative to ${input.order.requiredDeliveryDate}.`,
+      `Ask about fictional purchase order ${canonical.order.purchaseOrderRef} from ${canonical.order.supplierName}.`,
+      `Confirm the quantity expected (${canonical.order.expectedQuantity}), quantity ready now, quantity delayed, and promised delivery date relative to ${canonical.order.requiredDeliveryDate}.`,
       "Ask for the delay reason, whether human follow-up is required, and whether the supplier is unable to fulfill the order.",
       "If the recipient declines, stop politely and do not invent answers. If nobody answers, do not infer supplier facts.",
     ].join("\n"),
-    recipients: [{ phones: [input.recipient.phoneE164], region: "US", locale: "en-US" }],
+    recipients: [{
+      phones: [canonical.recipient.phoneE164],
+      region: canonical.recipient.region,
+      locale: canonical.recipient.locale,
+    }],
     recipient_result_schema: recipientResultSchema,
-    metadata: { workflow_run_id: input.runId },
+    metadata: { workflow_run_id: canonical.runId },
   } as const;
 }
 ```
@@ -1049,7 +1073,17 @@ git commit -m "feat: add strict CALL-E REST adapter"
 
 - [ ] **Step 1: Write failing duplicate and ambiguous-create tests**
 
-Cover missing authorization, two simultaneous starts, create timeout before call ID, process restart with `CALL_STARTING`, stable idempotency key reuse, byte-equivalent request digest, idempotency conflict without key replacement, existing call ID, unknown provider status, and terminal provider completion. At the application boundary, prove that both `startRun` and `reconcileRun` leave no-ID `CALL_STARTING` and `RECONCILING` runs pending with zero create and zero GET gateway operations. Prove that a stored Developer API `call_id` reconciles through the GET gateway only and never invokes create. Reject an attempted Billing reference submission as a `call_id` before any gateway operation.
+Cover missing authorization, two simultaneous starts, create timeout before call
+ID, process restart with `CALL_STARTING`, stable-key persistence and identity
+verification, byte-equivalent request digest, idempotency conflict without key
+replacement, persisted Developer API call ID, unknown provider status, and
+terminal provider completion. At the application boundary, prove that both
+`startRun(deps, runId)` and `reconcileRun(deps, runId)` leave no-ID
+`CALL_STARTING` and `RECONCILING` runs pending with zero create and zero GET
+gateway operations. Prove that a stored Developer API `call_id` reconciles
+through the GET gateway only and never invokes create. Task 7 accepts only the
+local run ID; stable key and digest persistence prove identity and never grant
+permission for another POST.
 
 ```ts
 it("never retries create after an ambiguous outcome", async () => {
@@ -1119,7 +1153,9 @@ const PROVIDER_STATUS: Readonly<Record<string, RunStatus>> = {
 
 Run: `pnpm vitest run src/application/idempotency.test.ts src/application/start-run.test.ts src/application/reconcile-run.test.ts tests/integration/call-lifecycle.test.ts`
 
-Expected: PASS; every scenario records at most one distinct idempotency key and call ID.
+Expected: PASS; every run invokes the create gateway at most once, while its
+stable key and request digest remain identity evidence and a stored Developer
+API `call_id` is reconciled through GET only.
 
 - [ ] **Step 6: Commit**
 
@@ -1147,7 +1183,11 @@ git commit -m "feat: reconcile one CALL-E call safely"
 
 - [ ] **Step 1: Write failing preflight safety tests**
 
-Test missing `CALLE_API_KEY`, missing `SUPPLIER_TEST_PHONE`, non-US number, non-interactive execution, absent exact confirmation phrase, invalid scenario, and any attempt to run more than one call per process.
+Test missing `CALLE_API_KEY`, missing `SUPPLIER_TEST_PHONE`, unsupported or
+malformed recipient profiles, missing or invalid Ukraine language selection,
+cross-profile mismatches, non-interactive execution, absent exact confirmation
+phrase, invalid scenario, and any attempt to run more than one call per
+process. Valid Kenya and Ukraine profiles remain accepted.
 
 - [ ] **Step 2: Run and observe expected failures**
 
@@ -1157,18 +1197,40 @@ Expected: FAIL because the harness is missing.
 
 - [ ] **Step 3: Implement the guarded harness**
 
-The script reads the phone from `SUPPLIER_TEST_PHONE`, never from a command argument. It displays the scenario and masked number, then requires the operator to type exactly `AUTHORIZE ONE CALL`. It writes raw results only under ignored `tmp/preflight-private/` and prints a sanitized summary.
+The script reads the phone from `SUPPLIER_TEST_PHONE` and the bounded optional
+language selection from `SUPPLIER_TEST_LANGUAGE`, never from a command
+argument. It composes the recipient through `createCallRecipient`, validates
+the resulting complete value through `callRecipientSchema`, displays the
+scenario, mask, canonical country, language, region, and locale, then requires
+the operator to type exactly `AUTHORIZE ONE CALL`. It writes raw results only
+under ignored `tmp/preflight-private/` and prints a sanitized summary.
 
 ```ts
 const scenario = scenarioSchema.parse(readScenario(process.argv));
-const phone = usPhoneSchema.parse(process.env.SUPPLIER_TEST_PHONE);
+const language = process.env.SUPPLIER_TEST_LANGUAGE;
+const recipient = callRecipientSchema.parse(
+  createCallRecipient({
+    recipientName: "Consenting participant",
+    phoneE164: process.env.SUPPLIER_TEST_PHONE,
+    ...(language === undefined ? {} : { language }),
+  }),
+);
+const presentation = getCallRecipientPresentation(recipient);
 const confirmation = await prompt(
-  `Scenario: ${scenario}\nRecipient: ${maskPhone(phone)}\nType AUTHORIZE ONE CALL: `,
+  [
+    `Scenario: ${scenario}`,
+    `Recipient: ${recipient.maskedPhone}`,
+    `Country: ${presentation.country}`,
+    `Language: ${presentation.language}`,
+    `Region: ${recipient.region}`,
+    `Locale: ${recipient.locale}`,
+    "Type AUTHORIZE ONE CALL:",
+  ].join("\n"),
 );
 if (confirmation !== "AUTHORIZE ONE CALL") {
   throw new AppError("AUTHORIZATION_REQUIRED");
 }
-await executeExactlyOnePreflightCall({ scenario, phone });
+await executeExactlyOnePreflightCall({ scenario, recipient });
 ```
 
 - [ ] **Step 4: Test the harness without placing a call**
@@ -1230,8 +1292,8 @@ and stop expansion until it is understood or explicitly accepted by an
 owner-approved amendment.
 
 Do not mark the Ukrainian observation or any other no-ID call as passing. Keep
-the hard stop before Task 9 until an authoritative `call_id` and terminal GET
-resource support a separately authorized preflight.
+Task 9 blocked, and retain that hard stop until an authoritative `call_id` and
+terminal GET resource support a separately authorized preflight.
 
 ```bash
 git add docs/verification/call-e-preflight.md
@@ -1538,7 +1600,13 @@ Test operator mode requiring `CALLE_API_KEY`, `OPENAI_API_KEY`, and a validated 
 
 - [ ] **Step 2: Write failing route tests**
 
-Cover malformed JSON, oversized bodies, invalid run IDs, unknown fields, duplicate start requests, replay-mode mutation attempts, artifact traversal, non-allowlisted artifact names, and raw dependency errors.
+Cover malformed JSON, oversized bodies, invalid run IDs, unknown fields,
+duplicate start requests, replay-mode mutation attempts, artifact traversal,
+non-allowlisted artifact names, and raw dependency errors. For the
+run-ID-scoped reconcile route, prove that a body containing `callId`,
+`billingReference`, or any other field is rejected before application
+composition or gateway access. The route accepts no client-controlled provider
+identity.
 
 - [ ] **Step 3: Run and observe expected failures**
 
@@ -1568,7 +1636,15 @@ export function parseServerEnv(env: NodeJS.ProcessEnv): ServerConfig {
 
 - [ ] **Step 5: Implement route handlers and the bounded error envelope**
 
-Set no-store responses for private run data. Accept only strict request schemas with a 32 KiB limit. Return `{ error: { code, message } }` with allowlisted codes and generic bounded messages. Never return stack traces, native paths, keys, full phone numbers, or raw provider data.
+Set no-store responses for private run data. Accept only strict request schemas
+with a 32 KiB limit. The reconcile route is scoped only by validated local run
+ID, rejects `callId`, `billingReference`, and every other body field before
+application composition or gateway access, then loads and strictly validates
+only the persisted Developer API `call_id` for GET-only reconciliation. Do not
+add a provider-identity request schema, route, or storage field. Return
+`{ error: { code, message } }` with allowlisted codes and generic bounded
+messages. Never return stack traces, native paths, keys, full phone numbers, or
+raw provider data.
 
 ```ts
 export function errorResponse(error: unknown): Response {
@@ -1625,7 +1701,13 @@ git commit -m "feat: expose mode-safe operator routes"
 
 - [ ] **Step 1: Write failing component tests for the approved workflow**
 
-Test Northstar defaults, masked phone display, `US` and `English`, exact call questions, all consent confirmations, disabled authorization until all checks pass, one-call label, progress states, `Stop future processing`, conflict and correction forms, deterministic risk, trust status, and four artifact links. For no-ID `RECONCILING`, require:
+Test Northstar defaults, including its fictional `US/en-US` profile, plus
+canonical masked phone, country, language, region, and locale presentation for
+every profile already supported by `src/domain/call-recipient.ts`; exact call
+questions; all consent confirmations; disabled authorization until all checks
+pass; one-call label; progress states; `Stop future processing`; conflict and
+correction forms; deterministic risk; trust status; and four artifact links.
+For no-ID `RECONCILING`, require:
 
 ```tsx
 expect(screen.getByText("Call response timed out")).toBeVisible();
@@ -1652,9 +1734,12 @@ warning through its accessible status region, and expose an accessible
 confirmed-failure presentation is rendered. A stored-ID component case must
 prove that its timer calls `reconcileExistingCall(run.id)` only when a stored
 Developer API `call_id` enables it; the browser must not submit or control the
-`call_id`. The run-ID-scoped server route must read and strictly validate the
-persisted `call_id` before GET-only provider reconciliation. Pair this with the
-Task 7 application test proving the resulting gateway operation is GET-only.
+`call_id`. Every client reconcile request is run-ID-scoped and contains neither
+`callId` nor `billingReference`. The Task 12 server route rejects those and all
+other body fields before composition or gateway access, reads and strictly
+validates only the persisted `call_id`, and performs GET-only reconciliation.
+Pair this with the Task 7 application test proving the resulting gateway
+operation is GET-only.
 
 The recovery panel must display masked recipient, canonical profile,
 approximate UTC attempt time, the 10-minute checklist, and the Billing-reference
@@ -1662,10 +1747,12 @@ explanation. Its only actions are **View recovery instructions**, **Record
 observation**, **Copy sanitized support summary**, and **Stop future
 processing**. It must not render a control or input for a retry, redial, start
 another call, generation or entry of another idempotency key, or entry of a
-Billing reference as a Developer API `call_id`. Component and application
-tests must prove that a Billing reference cannot be submitted as `call_id` and
-causes zero provider operations. These labels establish the future UI contract
-but do not authorize a new write route or persistence field. If Task 13 begins
+Billing reference as a Developer API `call_id`. Component tests must prove no
+such field or control exists and that client reconcile requests contain
+neither `callId` nor `billingReference`; Task 12 route tests own unknown-field
+rejection and the zero-gateway-operation assertion. These labels establish the
+future UI contract but do not authorize a new runtime schema, route, write
+operation, or persistence field. If Task 13 begins
 without an approved bounded port for recording the observation, stop and obtain
 a narrow runtime amendment instead of inventing storage or overloading human
 confirmation.
@@ -1686,7 +1773,9 @@ Use accessible labels and validation. Explain that the application places one AI
   <ConsentCheckbox name="consentToCall">The recipient consented to this call.</ConsentCheckbox>
   <ConsentCheckbox name="consentToRecord">The recipient consented to recording.</ConsentCheckbox>
   <ConsentCheckbox name="consentToPublish">The recipient consented to the approved demo excerpt.</ConsentCheckbox>
-  <ConsentCheckbox name="supportedRegionConfirmed">The reviewed number is in the United States.</ConsentCheckbox>
+  <ConsentCheckbox name="supportedRegionConfirmed">
+    The reviewed phone, country, language, region, and locale match one canonical supported profile.
+  </ConsentCheckbox>
   <button disabled={!allConfirmationsChecked}>Authorize one call</button>
 </fieldset>
 ```
@@ -1882,9 +1971,11 @@ test("preserves an ambiguous call without offering another call", async ({ page 
 Require the copied support summary to exclude full phone, credential, full
 Billing reference, native path, raw provider data, and participant identity.
 Also assert the recovery UI exposes no idempotency-key generation or entry and
-no Billing-reference-as-`call_id` entry or submit control; test an attempted
-Billing-reference-as-`call_id` submission through the application boundary is
-rejected with zero provider operations.
+no Billing-reference-as-`call_id` entry or submit control. Inspect every client
+reconcile request and assert that it is run-ID-scoped and contains neither
+`callId` nor `billingReference`. Task 12 route tests, not a new application
+input, prove that direct requests containing either field or any unknown field
+are rejected before composition with zero provider operations.
 
 - [ ] **Step 3: Write failing replay E2E**
 
@@ -2047,7 +2138,12 @@ Lead with the real problem, a repository badge labeled `Public replay pending de
 
 - [ ] **Step 4: Complete the Windows operator runbook**
 
-Use PowerShell syntax such as `$env:CALLE_API_KEY = "..."` only as non-secret local examples. Document consent, one-call authorization, supported `US` recipient, live preflight, ambiguous create recovery, `Stop future processing`, local secret storage, sanitized export, and credential cleanup. Keep CLI/MCP installation optional and outside the app runtime.
+Use PowerShell syntax such as `$env:CALLE_API_KEY = "..."` only as non-secret
+local examples. Document consent, one-call authorization, every canonical
+recipient profile in `src/domain/call-recipient.ts`, live preflight, ambiguous
+create recovery, `Stop future processing`, local secret storage, sanitized
+export, and credential cleanup. Keep CLI/MCP installation optional and outside
+the app runtime.
 
 - [ ] **Step 5: Add architecture, trust, demo, and release documentation**
 
@@ -2176,7 +2272,7 @@ Verify the public repository, Apache 2.0 license at root, public replay, public 
 | 10. Required CI is offline and credential-free | 1, 6, 10, 15, 16 |
 | 11. Three-call preflight is truthful and documented | 8, 17, 18 |
 | 12. Public surfaces contain no unapproved personal data | 11, 14, 16, 17, 18 |
-| 13. OpenAPI 0.6.0, US/en-US, fail-closed statuses | 6, 7, 8 |
+| 13. OpenAPI 0.6.0, canonical supported recipient profiles, fail-closed statuses | 2, 6, 7, 8, 13 |
 | 14. CLI/MCP/OAuth cache excluded from runtime and deployment | 1, 8, 12, 16, 17 |
 
 ## Execution Gates
