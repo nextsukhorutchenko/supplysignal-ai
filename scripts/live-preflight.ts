@@ -24,9 +24,11 @@ import type { CalleEventPage, Clock } from "../src/application/ports.js";
 import { reconcileRun } from "../src/application/reconcile-run.js";
 import { startRun } from "../src/application/start-run.js";
 import {
+  CallRecipientValidationError,
   createCallRecipient,
   getCallRecipientPresentation,
   type CallRecipient,
+  type RecipientLanguage,
 } from "../src/domain/call-recipient.js";
 import { AppError } from "../src/domain/errors.js";
 import {
@@ -69,6 +71,7 @@ type PreflightErrorCode =
   | "PREFLIGHT_CALL_LIMIT_REACHED"
   | "AUTHORIZATION_REQUIRED"
   | "UNSUPPORTED_RECIPIENT_REGION"
+  | "UNSUPPORTED_RECIPIENT_LANGUAGE"
   | "CALL_OUTCOME_PENDING";
 
 export class PreflightError extends Error {
@@ -91,8 +94,10 @@ export type PreflightProcessInput = {
 export type PreflightSummary = {
   scenario: PreflightScenario;
   maskedPhone: string;
-  country: "United States" | "Kenya";
-  language: "English";
+  country: "United States" | "Kenya" | "Ukraine";
+  language: RecipientLanguage;
+  region: CallRecipient["region"];
+  locale: CallRecipient["locale"];
   status: RunRecord["status"];
   providerStatus: ProviderEvidenceSnapshot["status"] | "not_available";
   eventCount: number;
@@ -207,25 +212,37 @@ function parseScenario(argv: readonly string[]): PreflightScenario {
 function requireConfiguration(env: PreflightProcessInput["env"]): {
   apiKey: string;
   recipient: CallRecipient;
-  country: "United States" | "Kenya";
-  language: "English";
+  country: "United States" | "Kenya" | "Ukraine";
+  language: RecipientLanguage;
 } {
   const apiKey = env.CALLE_API_KEY;
   const phone = env.SUPPLIER_TEST_PHONE;
+  const language = env.SUPPLIER_TEST_LANGUAGE;
   if (typeof apiKey !== "string" || apiKey.length === 0) {
     fail("PREFLIGHT_CONFIGURATION_REQUIRED");
   }
   if (typeof phone !== "string" || phone.length === 0) {
     fail("PREFLIGHT_CONFIGURATION_REQUIRED");
   }
+  if (
+    language !== undefined &&
+    language !== "English" &&
+    language !== "Ukrainian"
+  ) {
+    fail("UNSUPPORTED_RECIPIENT_LANGUAGE");
+  }
   try {
     const recipient = createCallRecipient({
       recipientName: "Consenting participant",
       phoneE164: phone,
+      ...(language === undefined ? {} : { language }),
     });
     const presentation = getCallRecipientPresentation(recipient);
     return { apiKey, recipient, ...presentation };
-  } catch {
+  } catch (error: unknown) {
+    if (error instanceof CallRecipientValidationError) {
+      fail(error.code);
+    }
     fail("UNSUPPORTED_RECIPIENT_REGION");
   }
 }
@@ -251,6 +268,8 @@ export function createPreflightProcess() {
           `Recipient: ${configuration.recipient.maskedPhone}`,
           `Country: ${configuration.country}`,
           `Language: ${configuration.language}`,
+          `Region: ${configuration.recipient.region}`,
+          `Locale: ${configuration.recipient.locale}`,
         ].join("\n"),
       );
       const confirmation = await input.prompt(`Type ${AUTHORIZATION_PHRASE}: `);
@@ -276,6 +295,8 @@ export function createPreflightProcess() {
       maskedPhone: configuration.recipient.maskedPhone,
       country: configuration.country,
       language: configuration.language,
+      region: configuration.recipient.region,
+      locale: configuration.recipient.locale,
       status: result.run.status,
       providerStatus: result.run.providerSnapshot?.status ?? "not_available",
       eventCount: result.events.length,

@@ -14,7 +14,7 @@ before any interactive wait. The harness:
 - accepts exactly one scenario: `answered`, `declined`, or `no_answer`;
 - reads the recipient only from the server-side `SUPPLIER_TEST_PHONE`
   environment variable;
-- accepts only the approved United States and Kenya profiles listed below;
+- accepts only the approved United States, Kenya, and Ukraine profiles listed below;
 - requires an interactive terminal and the exact phrase
   `AUTHORIZE ONE CALL`;
 - uses the existing CALL-E adapter, stored call identifier, and reconciliation
@@ -23,17 +23,23 @@ before any interactive wait. The harness:
 - stores private run evidence only below the repository-anchored, ignored
   `tmp/preflight-private/<run-id>/` directory.
 
-| Country       | Strict E.164 pattern | Display mask       | Region | Locale  | Language |
-| ------------- | -------------------- | ------------------ | ------ | ------- | -------- |
-| United States | `^\+1[2-9]\d{9}$`    | `+1 ***-***-1234`  | `US`   | `en-US` | English  |
-| Kenya         | `^\+254[1-9]\d{8}$`  | `+254 ***-**-1234` | `KE`   | `en-KE` | English  |
+| Country       | Strict E.164 pattern | Display mask       | Region | Locale  | Language  |
+| ------------- | -------------------- | ------------------ | ------ | ------- | --------- |
+| United States | `^\+1[2-9]\d{9}$`    | `+1 ***-***-1234`  | `US`   | `en-US` | English   |
+| Kenya         | `^\+254[1-9]\d{8}$`  | `+254 ***-**-1234` | `KE`   | `en-KE` | English   |
+| Ukraine       | `^\+380[1-9]\d{8}$`  | `+380 **-***-1234` | `UA`   | `en-UA` | English   |
+| Ukraine       | `^\+380[1-9]\d{8}$`  | `+380 **-***-1234` | `UA`   | `uk-UA` | Ukrainian |
 
-The harness derives `region` and `locale` from the validated phone number;
-they are not operator inputs. Kenya currently uses an international line
-primarily intended for testing. Before every Kenyan live preflight, perform a
-same-day check that the
+The harness derives `region` and `locale` from the validated canonical
+recipient profile; they are not free-form operator inputs. For Ukraine, the
+canonical locale depends on both the validated `+380` phone and the exact
+allowlisted `SUPPLIER_TEST_LANGUAGE`. That variable is required only for
+Ukraine and must be absent for United States and Kenya. Kenya and Ukraine
+currently use international lines primarily intended for testing. Before every
+Kenyan or Ukrainian live preflight, perform a same-day check that the
 [official CALL-E supported-regions table](https://github.com/CALLE-AI/call-e-integrations#-supported-regions-and-languages)
-still lists `KE + English` as supported.
+still lists `KE + English` or `UA + selected language`, respectively, as
+supported.
 
 Do not rerun a scenario to recover from a timeout or an empty CALL-E Dashboard.
 An ambiguous response may still mean that the provider created the call. Keep
@@ -77,7 +83,20 @@ files, or chat messages:
 
 ```powershell
 $env:CALLE_API_KEY = Read-Host "CALL-E API key"
-$env:SUPPLIER_TEST_PHONE = Read-Host "Consenting US or Kenya recipient in strict E.164 format"
+$env:SUPPLIER_TEST_PHONE = Read-Host "Consenting US, Kenya, or Ukraine recipient in strict E.164 format"
+```
+
+Set the recipient-language policy in the same PowerShell process:
+
+```powershell
+# United States or Kenya
+Remove-Item Env:SUPPLIER_TEST_LANGUAGE -ErrorAction SilentlyContinue
+
+# Ukraine English
+$env:SUPPLIER_TEST_LANGUAGE = "English"
+
+# Ukraine Ukrainian
+$env:SUPPLIER_TEST_LANGUAGE = "Ukrainian"
 ```
 
 The reviewed runtime contract is CALL-E OpenAPI `0.6.0`. The application uses
@@ -90,6 +109,7 @@ absent in a separate PowerShell window:
 ```powershell
 Remove-Item Env:CALLE_API_KEY -ErrorAction SilentlyContinue
 Remove-Item Env:SUPPLIER_TEST_PHONE -ErrorAction SilentlyContinue
+Remove-Item Env:SUPPLIER_TEST_LANGUAGE -ErrorAction SilentlyContinue
 corepack pnpm tsx scripts/live-preflight.ts --scenario answered
 ```
 
@@ -117,8 +137,8 @@ or:
 corepack pnpm tsx scripts/live-preflight.ts --scenario no_answer
 ```
 
-Verify the displayed scenario, country, language, and masked number. If any
-value is wrong, do not authorize. Otherwise type exactly:
+Verify the displayed scenario, country, language, region, locale, and masked
+number. If any value is wrong, do not authorize. Otherwise type exactly:
 
 ```text
 AUTHORIZE ONE CALL
@@ -156,7 +176,7 @@ exact observation-window end time.
 ## Evidence handling
 
 The harness prints only a sanitized result with the scenario, country,
-language, masked phone, bounded statuses, and event count. Private records may
+language, region, locale, masked phone, bounded statuses, and event count. Private records may
 contain a full phone, call identifier, transcript, or structured provider
 result and therefore stay under:
 
@@ -199,7 +219,11 @@ context, and the final pass/fail decision.
 - `AUTHORIZATION_REQUIRED`: the exact phrase was not entered. No call was
   attempted.
 - `UNSUPPORTED_RECIPIENT_REGION`: review the number. This vertical slice calls
-  only the approved US and Kenya profiles.
+  only the approved US, Kenya, and Ukraine profiles.
+- `UNSUPPORTED_RECIPIENT_LANGUAGE`: remove `SUPPLIER_TEST_LANGUAGE` for US or
+  Kenya, or set it to exactly `English` or `Ukrainian` for Ukraine. Do not
+  authorize until the displayed country, language, region, and locale are
+  correct.
 - `CALL_OUTCOME_PENDING`: do not rerun the harness. Preserve private state and
   reconcile or escalate the existing call. This includes bounded polling that
   ended while the call was still active and event pagination that remained
@@ -232,12 +256,13 @@ a public channel.
 
 ## Credential cleanup
 
-After the authorized scenario finishes, remove both values from the current
+After the authorized scenario finishes, remove all three values from the current
 PowerShell process:
 
 ```powershell
 Remove-Item Env:CALLE_API_KEY -ErrorAction SilentlyContinue
 Remove-Item Env:SUPPLIER_TEST_PHONE -ErrorAction SilentlyContinue
+Remove-Item Env:SUPPLIER_TEST_LANGUAGE -ErrorAction SilentlyContinue
 ```
 
 Close the terminal before recording screenshots or the public demo.

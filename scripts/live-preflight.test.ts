@@ -23,6 +23,7 @@ import type {
 const apiKey = "server-only-test-token";
 const phone = ["+1", "202", "555", "0147"].join("");
 const kenyaPhone = ["+254", "100", "000", "000"].join("");
+const ukrainePhone = ["+380", "100", "000", "000"].join("");
 const scriptsDirectory = fileURLToPath(new URL(".", import.meta.url));
 const repositoryRoot = resolve(scriptsDirectory, "..");
 const privateRoot = resolve(repositoryRoot, "tmp", "preflight-private");
@@ -111,6 +112,7 @@ const guardedRunId = `preflight-answered-${runUuid.replaceAll("-", "")}`;
 type GuardedCliOptions = {
   apiKey?: string;
   phone?: string;
+  language?: string;
   phrase?: string;
   interactive?: boolean;
   fetchMock?: typeof fetch;
@@ -123,6 +125,7 @@ type GuardedCliResult = {
   error: unknown;
   output: string;
   fetchMock: ReturnType<typeof vi.fn<typeof fetch>>;
+  promptMock: ReturnType<typeof vi.fn>;
 };
 
 async function runGuardedCli(
@@ -140,9 +143,10 @@ async function runGuardedCli(
       randomUUID: vi.fn(() => uuids.shift() ?? temporaryUuid),
     };
   });
+  const promptMock = vi.fn(async () => options.phrase ?? "AUTHORIZE ONE CALL");
   vi.doMock("node:readline/promises", () => ({
     createInterface: () => ({
-      question: vi.fn(async () => options.phrase ?? "AUTHORIZE ONE CALL"),
+      question: promptMock,
       close: vi.fn(),
     }),
   }));
@@ -168,6 +172,7 @@ async function runGuardedCli(
   const originalArgv = process.argv;
   const originalApiKey = process.env.CALLE_API_KEY;
   const originalPhone = process.env.SUPPLIER_TEST_PHONE;
+  const originalLanguage = process.env.SUPPLIER_TEST_LANGUAGE;
   const stdinTty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
   const stdoutTty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
   const output: string[] = [];
@@ -200,6 +205,11 @@ async function runGuardedCli(
   } else {
     process.env.SUPPLIER_TEST_PHONE = options.phone;
   }
+  if (options.language === undefined) {
+    delete process.env.SUPPLIER_TEST_LANGUAGE;
+  } else {
+    process.env.SUPPLIER_TEST_LANGUAGE = options.language;
+  }
   Object.defineProperty(process.stdin, "isTTY", {
     configurable: true,
     value: options.interactive ?? true,
@@ -228,6 +238,11 @@ async function runGuardedCli(
     } else {
       process.env.SUPPLIER_TEST_PHONE = originalPhone;
     }
+    if (originalLanguage === undefined) {
+      delete process.env.SUPPLIER_TEST_LANGUAGE;
+    } else {
+      process.env.SUPPLIER_TEST_LANGUAGE = originalLanguage;
+    }
     if (stdinTty === undefined) {
       delete (process.stdin as { isTTY?: boolean }).isTTY;
     } else {
@@ -247,7 +262,7 @@ async function runGuardedCli(
     vi.doUnmock("node:readline/promises");
     vi.resetModules();
   }
-  return { error, output: output.join(""), fetchMock };
+  return { error, output: output.join(""), fetchMock, promptMock };
 }
 
 describe("live CALL-E preflight safety boundary", () => {
@@ -301,6 +316,62 @@ describe("live CALL-E preflight safety boundary", () => {
       expect(JSON.stringify(writeOutput.mock.calls)).not.toContain(
         invalidPhone,
       );
+    },
+  );
+
+  it.each([
+    [undefined, "missing"],
+    ["ukrainian", "wrong case"],
+    ["Ukrainian ", "padded"],
+    ["French", "unsupported"],
+  ] as const)(
+    "rejects %s Ukraine language before authorization",
+    async (language, _case) => {
+      void _case;
+      const { createPreflightProcess } = await freshModule();
+      const run = createPreflightProcess();
+      const input = validInput({
+        env: {
+          CALLE_API_KEY: apiKey,
+          SUPPLIER_TEST_PHONE: ukrainePhone,
+          ...(language === undefined
+            ? {}
+            : { SUPPLIER_TEST_LANGUAGE: language }),
+        },
+      });
+
+      await expect(run(input)).rejects.toMatchObject({
+        code: "UNSUPPORTED_RECIPIENT_LANGUAGE",
+      });
+      expect(input.prompt).not.toHaveBeenCalled();
+      expect(input.execute).not.toHaveBeenCalled();
+      expect(input.writePrivateEvidence).not.toHaveBeenCalled();
+      expect(
+        JSON.stringify(
+          (input.writeOutput as ReturnType<typeof vi.fn>).mock.calls,
+        ),
+      ).not.toContain(language ?? "missing");
+    },
+  );
+
+  it.each([phone, kenyaPhone])(
+    "rejects an extra language for an established recipient before authorization",
+    async (recipientPhone) => {
+      const { createPreflightProcess } = await freshModule();
+      const input = validInput({
+        env: {
+          CALLE_API_KEY: apiKey,
+          SUPPLIER_TEST_PHONE: recipientPhone,
+          SUPPLIER_TEST_LANGUAGE: "English",
+        },
+      });
+
+      await expect(createPreflightProcess()(input)).rejects.toMatchObject({
+        code: "UNSUPPORTED_RECIPIENT_LANGUAGE",
+      });
+      expect(input.prompt).not.toHaveBeenCalled();
+      expect(input.execute).not.toHaveBeenCalled();
+      expect(input.writePrivateEvidence).not.toHaveBeenCalled();
     },
   );
 
@@ -502,6 +573,53 @@ describe("live CALL-E preflight safety boundary", () => {
     expect(JSON.stringify(writeOutput.mock.calls)).toContain("Kenya");
     expect(JSON.stringify(writeOutput.mock.calls)).toContain("English");
   });
+
+  it.each([
+    ["English", "en-UA"],
+    ["Ukrainian", "uk-UA"],
+  ] as const)(
+    "derives the canonical Ukraine %s profile",
+    async (language, locale) => {
+      const { createPreflightProcess } = await freshModule();
+      const run = createPreflightProcess();
+      const input = validInput({
+        env: {
+          CALLE_API_KEY: apiKey,
+          SUPPLIER_TEST_PHONE: ukrainePhone,
+          SUPPLIER_TEST_LANGUAGE: language,
+        },
+      });
+
+      const summary = await run(input);
+
+      expect(input.execute).toHaveBeenCalledWith({
+        scenario: "answered",
+        apiKey,
+        recipient: {
+          recipientName: "Consenting participant",
+          phoneE164: ukrainePhone,
+          maskedPhone: "+380 **-***-0000",
+          region: "UA",
+          locale,
+        },
+      });
+      expect(summary).toMatchObject({
+        country: "Ukraine",
+        language,
+        region: "UA",
+        locale,
+        maskedPhone: "+380 **-***-0000",
+      });
+      const output = JSON.stringify(
+        (input.writeOutput as ReturnType<typeof vi.fn>).mock.calls,
+      );
+      expect(output).toContain("Ukraine");
+      expect(output).toContain(language);
+      expect(output).toContain("UA");
+      expect(output).toContain(locale);
+      expect(output).not.toContain(ukrainePhone);
+    },
+  );
 });
 
 describe("actual offline CLI composition", () => {
@@ -529,6 +647,39 @@ describe("actual offline CLI composition", () => {
     expect(result.fetchMock).not.toHaveBeenCalled();
     await expect(readdir(resolve(privateRoot, guardedRunId))).rejects.toThrow();
   });
+
+  it.each([
+    ["wrong national length", ["+380", "100", "000", "00"].join("")],
+    ["leading national zero", ["+380", "000", "000", "000"].join("")],
+    ["whitespace", ["+380", "100", " 000", "000"].join("")],
+    ["separator", ["+380", "100", "-000", "000"].join("")],
+    ["local format", ["0", "100", "000", "000"].join("")],
+  ] as const)(
+    "rejects malformed Ukraine %s before prompting, provider execution, or evidence",
+    async (_case, invalidPhone) => {
+      await removeSession(guardedRunId);
+      const result = await runGuardedCli({
+        apiKey,
+        phone: invalidPhone,
+        language: "English",
+      });
+
+      expect(result.error).toMatchObject({
+        code: "UNSUPPORTED_RECIPIENT_REGION",
+      });
+      expect(result.promptMock).not.toHaveBeenCalled();
+      expect(result.fetchMock).not.toHaveBeenCalled();
+      expect(
+        result.fetchMock.mock.calls.filter(
+          ([, request]) => request?.method === "POST",
+        ),
+      ).toHaveLength(0);
+      expect(result.output).not.toContain(invalidPhone);
+      await expect(
+        readdir(resolve(privateRoot, guardedRunId)),
+      ).rejects.toThrow();
+    },
+  );
 
   it.each([
     {
@@ -626,6 +777,53 @@ describe("actual offline CLI composition", () => {
       await removeSession(guardedRunId);
     }
   });
+
+  it.each([
+    ["English", "en-UA"],
+    ["Ukrainian", "uk-UA"],
+  ] as const)(
+    "composes the guarded Ukraine %s request with exactly one local fake POST",
+    async (language, locale) => {
+      await removeSession(guardedRunId);
+      try {
+        const result = await runGuardedCli({
+          apiKey,
+          phone: ukrainePhone,
+          language,
+        });
+
+        expect(result.error).toBeUndefined();
+        expect(
+          result.fetchMock.mock.calls.filter(
+            ([, request]) => request?.method === "POST",
+          ),
+        ).toHaveLength(1);
+        const [, postRequest] =
+          result.fetchMock.mock.calls.find(
+            ([, request]) => request?.method === "POST",
+          ) ?? [];
+        const body = JSON.parse(String(postRequest?.body)) as {
+          recipients: readonly {
+            phones: readonly string[];
+            region: string;
+            locale: string;
+          }[];
+          task: string;
+        };
+        expect(body.recipients).toEqual([
+          { phones: [ukrainePhone], region: "UA", locale },
+        ]);
+        expect(body.task).toContain(
+          language === "Ukrainian"
+            ? "автоматизованим агентом на основі ШІ"
+            : "AI-assisted fictional supplier demo",
+        );
+        expect(result.output).not.toContain(ukrainePhone);
+      } finally {
+        await removeSession(guardedRunId);
+      }
+    },
+  );
 
   it("returns bounded pending after guarded polling remains active with one POST", async () => {
     await removeSession(guardedRunId);

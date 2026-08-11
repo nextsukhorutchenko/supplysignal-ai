@@ -11,6 +11,8 @@ export const CALLE_OPENAPI_VERSION = "0.6.0" as const;
 const MAX_CALL_TASK_LENGTH = 4_000;
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f-\u009f]/;
+const APPROVED_SUPPLIER_NAME = "Northstar Components";
+const APPROVED_PURCHASE_ORDER_REF = "PO-2048";
 
 function isEncodeSafe(value: string): boolean {
   try {
@@ -38,7 +40,16 @@ const createSupplierCallSchema: z.ZodType<CreateSupplierCall> =
     }),
   );
 
-export const recipientResultSchema = {
+function deepFreeze<T extends object>(value: T): Readonly<T> {
+  for (const nestedValue of Object.values(value)) {
+    if (nestedValue !== null && typeof nestedValue === "object") {
+      deepFreeze(nestedValue);
+    }
+  }
+  return Object.freeze(value);
+}
+
+export const recipientResultSchema = deepFreeze({
   type: "object",
   additionalProperties: false,
   required: [
@@ -100,7 +111,7 @@ export const recipientResultSchema = {
         "Whether the recipient explicitly said the order cannot be fulfilled.",
     },
   },
-} as const;
+} as const);
 
 function creationFailure(): AppError {
   return new AppError("CALL_CREATION_FAILED");
@@ -112,11 +123,17 @@ function requireSafeInlineText(value: string): void {
   }
 }
 
-function buildCanonicalCreateCallRequest(input: CreateSupplierCall) {
-  requireSafeInlineText(input.order.supplierName);
-  requireSafeInlineText(input.order.purchaseOrderRef);
+function requireApprovedDemoIdentity(input: CreateSupplierCall): void {
+  if (
+    input.order.supplierName !== APPROVED_SUPPLIER_NAME ||
+    input.order.purchaseOrderRef !== APPROVED_PURCHASE_ORDER_REF
+  ) {
+    throw creationFailure();
+  }
+}
 
-  const task = [
+function buildEnglishTask(input: CreateSupplierCall): string {
+  return [
     "You are SupplySignal AI, an automated calling agent.",
     "Immediately disclose that this is an AI-assisted fictional supplier demo and that the call may be recorded for an approved hackathon demonstration.",
     "After the complete disclosure, keep each spoken turn concise and natural: one or two short sentences. Ask only one question at a time and wait for the recipient's answer. Do not read the entire purchase order at once or repeat facts the recipient has already confirmed.",
@@ -125,6 +142,38 @@ function buildCanonicalCreateCallRequest(input: CreateSupplierCall) {
     "Ask for the delay reason, whether human follow-up is required, and whether the supplier is unable to fulfill the order.",
     "If the recipient declines, stop politely and do not invent answers. If nobody answers, do not infer supplier facts.",
   ].join("\n");
+}
+
+function buildUkrainianTask(input: CreateSupplierCall): string {
+  return [
+    "Ви — SupplySignal AI, автоматизований агент для телефонних дзвінків.",
+    "Негайно повідомте, що співрозмовник розмовляє з автоматизованим агентом на основі ШІ, сценарій із постачальником є вигаданим, а дзвінок може записуватися для схваленої демонстрації на хакатоні.",
+    "Після повного повідомлення говоріть стисло й природно: одне або два короткі речення. Ставте лише одне питання за раз і дочекайтеся відповіді. Не зачитуйте все замовлення одразу та не повторюйте вже підтверджені факти.",
+    `Запитайте про вигадане замовлення на закупівлю ${input.order.purchaseOrderRef} від ${input.order.supplierName}.`,
+    `Підтвердьте очікувану кількість (${input.order.expectedQuantity}), кількість, готову зараз, кількість із затримкою та обіцяну дату поставки відносно ${input.order.requiredDeliveryDate}.`,
+    "Запитайте про причину затримки, потребу у зв’язку з менеджером і чи може постачальник виконати замовлення.",
+    "Якщо співрозмовник відмовляється, ввічливо завершіть розмову й не вигадуйте відповіді. Якщо ніхто не відповідає, не робіть висновків про факти щодо постачальника.",
+  ].join("\n");
+}
+
+function buildCanonicalCreateCallRequest(input: CreateSupplierCall) {
+  requireSafeInlineText(input.order.supplierName);
+  requireSafeInlineText(input.order.purchaseOrderRef);
+  requireApprovedDemoIdentity(input);
+
+  let task: string;
+  switch (input.recipient.locale) {
+    case "en-US":
+    case "en-KE":
+    case "en-UA":
+      task = buildEnglishTask(input);
+      break;
+    case "uk-UA":
+      task = buildUkrainianTask(input);
+      break;
+    default:
+      throw creationFailure();
+  }
 
   if (task.length > MAX_CALL_TASK_LENGTH) {
     throw creationFailure();
