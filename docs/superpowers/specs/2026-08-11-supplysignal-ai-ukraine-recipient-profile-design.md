@@ -7,6 +7,10 @@
 **Scope:** Add guarded Ukraine English and Ukrainian recipient profiles beside
 the existing United States and Kenya profiles.
 
+**Correction A17:** The approved Ukraine mask is `+380 **-***-1234`. It
+accounts for the exact nine national digits required by
+`^\+380[1-9]\d{8}$` and supersedes the earlier eleven-position draft mask.
+
 ## 1. Product authority and scope
 
 This amendment extends the approved SupplySignal AI vertical slice with two
@@ -36,8 +40,8 @@ recipient profiles. The exact allowlist becomes:
 | --- | --- | --- | --- | --- | --- |
 | United States | `^\+1[2-9]\d{9}$` | `+1 ***-***-1234` | `US` | `en-US` | English |
 | Kenya | `^\+254[1-9]\d{8}$` | `+254 ***-**-1234` | `KE` | `en-KE` | English |
-| Ukraine | `^\+380[1-9]\d{8}$` | `+380 **-***-**-1234` | `UA` | `en-UA` | English |
-| Ukraine | `^\+380[1-9]\d{8}$` | `+380 **-***-**-1234` | `UA` | `uk-UA` | Ukrainian |
+| Ukraine | `^\+380[1-9]\d{8}$` | `+380 **-***-1234` | `UA` | `en-UA` | English |
+| Ukraine | `^\+380[1-9]\d{8}$` | `+380 **-***-1234` | `UA` | `uk-UA` | Ukrainian |
 
 The Ukraine pattern accepts only `+380` followed by exactly nine digits, with
 a non-zero first national digit. It rejects whitespace, separators,
