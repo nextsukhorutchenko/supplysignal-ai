@@ -30,8 +30,10 @@ before any interactive wait. The harness:
 | Ukraine       | `^\+380[1-9]\d{8}$`  | `+380 **-***-1234` | `UA`   | `en-UA` | English   |
 | Ukraine       | `^\+380[1-9]\d{8}$`  | `+380 **-***-1234` | `UA`   | `uk-UA` | Ukrainian |
 
-The harness derives `region` and `locale` from the validated phone number;
-they are not operator inputs. `SUPPLIER_TEST_LANGUAGE` is required only for
+The harness derives `region` and `locale` from the validated canonical
+recipient profile; they are not free-form operator inputs. For Ukraine, the
+canonical locale depends on both the validated `+380` phone and the exact
+allowlisted `SUPPLIER_TEST_LANGUAGE`. That variable is required only for
 Ukraine and must be absent for United States and Kenya. Kenya and Ukraine
 currently use international lines primarily intended for testing. Before every
 Kenyan or Ukrainian live preflight, perform a same-day check that the
@@ -254,7 +256,7 @@ a public channel.
 
 ## Credential cleanup
 
-After the authorized scenario finishes, remove both values from the current
+After the authorized scenario finishes, remove all three values from the current
 PowerShell process:
 
 ```powershell
