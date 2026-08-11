@@ -1049,7 +1049,7 @@ git commit -m "feat: add strict CALL-E REST adapter"
 
 - [ ] **Step 1: Write failing duplicate and ambiguous-create tests**
 
-Cover missing authorization, two simultaneous starts, create timeout before call ID, process restart with `CALL_STARTING`, stable idempotency key reuse, byte-equivalent request digest, idempotency conflict without key replacement, existing call ID, unknown provider status, and terminal provider completion.
+Cover missing authorization, two simultaneous starts, create timeout before call ID, process restart with `CALL_STARTING`, stable idempotency key reuse, byte-equivalent request digest, idempotency conflict without key replacement, existing call ID, unknown provider status, and terminal provider completion. At the application boundary, prove that both `startRun` and `reconcileRun` leave no-ID `CALL_STARTING` and `RECONCILING` runs pending with zero create and zero GET gateway operations. Prove that a stored Developer API `call_id` reconciles through the GET gateway only and never invokes create. Reject an attempted Billing reference submission as a `call_id` before any gateway operation.
 
 ```ts
 it("never retries create after an ambiguous outcome", async () => {
@@ -1634,17 +1634,38 @@ expect(
 ).toBeVisible();
 expect(screen.getByText("Developer API call ID: Not received")).toBeVisible();
 expect(screen.queryByRole("button", { name: /retry|redial|start another call/i })).not.toBeInTheDocument();
+expect(screen.getByText("RECONCILING", { exact: true })).toBeVisible();
+expect(screen.getByRole("status", { name: "Call response timed out" })).toHaveTextContent(
+  "The call may still occur even though no Developer API call ID was received. Do not start another call. Monitor the recipient phone and CALL-E Billing for 10 minutes, then follow the recovery instructions.",
+);
+expect(screen.getByRole("list", { name: "10-minute observation checklist" })).toBeVisible();
+expect(screen.queryByText(/success|call completed|confirmed failure/i)).not.toBeInTheDocument();
+await vi.advanceTimersByTimeAsync(2_001);
 expect(reconcileExistingCall).not.toHaveBeenCalled();
 ```
+
+Use fake timers and advance beyond the 2-second interval before asserting that
+no-ID `RECONCILING` made no reconciliation call. The component test must
+visibly render the literal status `RECONCILING`, expose the exact full bounded
+warning through its accessible status region, and expose an accessible
+10-minute observation checklist. It must assert neither generic success nor a
+confirmed-failure presentation is rendered. A stored-ID component case must
+prove that its timer calls `reconcileExistingCall` only for a stored Developer
+API `call_id`; pair it with the Task 7 application test proving the resulting
+gateway operation is GET-only.
 
 The recovery panel must display masked recipient, canonical profile,
 approximate UTC attempt time, the 10-minute checklist, and the Billing-reference
 explanation. Its only actions are **View recovery instructions**, **Record
 observation**, **Copy sanitized support summary**, and **Stop future
-processing**. These labels establish the future UI contract but do not
-authorize a new write route or persistence field. If Task 13 begins without an
-approved bounded port for recording the observation, stop and obtain a narrow
-runtime amendment instead of inventing storage or overloading human
+processing**. It must not render a control or input for a retry, redial, start
+another call, generation or entry of another idempotency key, or entry of a
+Billing reference as a Developer API `call_id`. Component and application
+tests must prove that a Billing reference cannot be submitted as `call_id` and
+causes zero provider operations. These labels establish the future UI contract
+but do not authorize a new write route or persistence field. If Task 13 begins
+without an approved bounded port for recording the observation, stop and obtain
+a narrow runtime amendment instead of inventing storage or overloading human
 confirmation.
 
 - [ ] **Step 2: Run and observe expected failures**
@@ -1693,10 +1714,13 @@ processing** never claims to cancel an active call.
 
 ```tsx
 useEffect(() => {
-  if (!RECONCILABLE_STATUSES.includes(run.status)) return;
-  const timer = window.setInterval(() => void reconcileExistingCall(run.id), 2_000);
+  if (!RECONCILABLE_STATUSES.includes(run.status) || !run.callId) return;
+  const timer = window.setInterval(
+    () => void reconcileExistingCall(run.id, run.callId),
+    2_000,
+  );
   return () => window.clearInterval(timer);
-}, [run.id, run.status]);
+}, [run.callId, run.id, run.status]);
 ```
 
 - [ ] **Step 5: Implement Supply Risk Briefing**
@@ -1844,6 +1868,12 @@ test("preserves an ambiguous call without offering another call", async ({ page 
   await expect(page.getByText("Call response timed out")).toBeVisible();
   await expect(page.getByText("Developer API call ID: Not received")).toBeVisible();
   await expect(page.getByRole("button", { name: /retry|redial|start another call/i })).toHaveCount(0);
+  await expect(page.getByText("RECONCILING", { exact: true })).toBeVisible();
+  await expect(page.getByRole("status", { name: "Call response timed out" })).toContainText(
+    "The call may still occur even though no Developer API call ID was received. Do not start another call. Monitor the recipient phone and CALL-E Billing for 10 minutes, then follow the recovery instructions.",
+  );
+  await expect(page.getByRole("list", { name: /10-minute observation checklist/i })).toBeVisible();
+  await expect(page.getByText(/success|call completed|confirmed failure/i)).toHaveCount(0);
   await page.reload();
   await expect(page.getByText("Call response timed out")).toBeVisible();
   expect(reconcileRequests).toEqual([]);
@@ -1852,6 +1882,10 @@ test("preserves an ambiguous call without offering another call", async ({ page 
 
 Require the copied support summary to exclude full phone, credential, full
 Billing reference, native path, raw provider data, and participant identity.
+Also assert the recovery UI exposes no idempotency-key generation or entry and
+no Billing-reference-as-`call_id` entry or submit control; test an attempted
+Billing-reference-as-`call_id` submission through the application boundary is
+rejected with zero provider operations.
 
 - [ ] **Step 3: Write failing replay E2E**
 
