@@ -101,6 +101,48 @@ function jsonResponse(body: string, status = 200): Response {
   });
 }
 
+type CompletedCallFixture = {
+  recipients: {
+    structured_result: Record<string, unknown> | null;
+    attempts: { transcript_turns: Record<string, unknown>[] }[];
+  }[];
+};
+
+async function completedFixtureResponse(
+  modify: (resource: CompletedCallFixture) => void,
+): Promise<Response> {
+  const resource = JSON.parse(
+    await fixture("completed-valid.json"),
+  ) as CompletedCallFixture;
+  modify(resource);
+  return jsonResponse(JSON.stringify(resource));
+}
+
+async function inconsistentCompletedResponse(): Promise<Response> {
+  return completedFixtureResponse((resource) => {
+    const structuredResult = resource.recipients[0]?.structured_result;
+    if (structuredResult === null || structuredResult === undefined) {
+      throw new Error("Expected the completed fixture structured result");
+    }
+    structuredResult.available_quantity = 17;
+    structuredResult.delayed_quantity = 5;
+  });
+}
+
+function fakeFetchWithCallResponse(
+  callResponse: () => Promise<Response>,
+): typeof fetch {
+  return async (url, init) => {
+    if (init?.method === "POST") {
+      return jsonResponse(await fixture("create-accepted.json"), 201);
+    }
+    if (String(url).endsWith("/events")) {
+      return jsonResponse(await fixture("events-page.json"));
+    }
+    return callResponse();
+  };
+}
+
 async function removeSession(runId: string): Promise<void> {
   await rm(resolve(privateRoot, runId), { recursive: true, force: true });
 }
@@ -116,6 +158,7 @@ type GuardedCliOptions = {
   phrase?: string;
   interactive?: boolean;
   fetchMock?: typeof fetch;
+  runSecondAttempt?: boolean;
   mockFileSystem?: (
     actual: typeof import("node:fs/promises"),
   ) => Partial<typeof import("node:fs/promises")>;
@@ -123,6 +166,7 @@ type GuardedCliOptions = {
 
 type GuardedCliResult = {
   error: unknown;
+  secondError: unknown;
   output: string;
   fetchMock: ReturnType<typeof vi.fn<typeof fetch>>;
   promptMock: ReturnType<typeof vi.fn>;
@@ -221,11 +265,21 @@ async function runGuardedCli(
   vi.stubGlobal("fetch", fetchMock);
 
   let error: unknown;
+  let secondError: unknown;
   try {
     const preflightModule = await import("./live-preflight.js");
-    await preflightModule.runCliPreflight();
-  } catch (caught: unknown) {
-    error = caught;
+    try {
+      await preflightModule.runCliPreflight();
+    } catch (caught: unknown) {
+      error = caught;
+    }
+    if (options.runSecondAttempt === true) {
+      try {
+        await preflightModule.runCliPreflight();
+      } catch (caught: unknown) {
+        secondError = caught;
+      }
+    }
   } finally {
     process.argv = originalArgv;
     if (originalApiKey === undefined) {
@@ -262,7 +316,13 @@ async function runGuardedCli(
     vi.doUnmock("node:readline/promises");
     vi.resetModules();
   }
-  return { error, output: output.join(""), fetchMock, promptMock };
+  return {
+    error,
+    secondError,
+    output: output.join(""),
+    fetchMock,
+    promptMock,
+  };
 }
 
 describe("live CALL-E preflight safety boundary", () => {
@@ -711,7 +771,7 @@ describe("actual offline CLI composition", () => {
     },
   );
 
-  it("uses guarded private composition from an alternate CWD with exactly one POST", async () => {
+  it("accepts the unchanged answered fixture with one guarded POST", async () => {
     await removeSession(guardedRunId);
     const outside = await mkdtemp(resolve(tmpdir(), "supplysignal-preflight-"));
     const originalCwd = process.cwd();
@@ -741,6 +801,111 @@ describe("actual offline CLI composition", () => {
       process.chdir(originalCwd);
       await removeSession(guardedRunId);
       await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects inconsistent terminal evidence without publication or permit reset", async () => {
+    await removeSession(guardedRunId);
+    const result = await runGuardedCli({
+      apiKey,
+      phone,
+      runSecondAttempt: true,
+      fetchMock: fakeFetchWithCallResponse(inconsistentCompletedResponse),
+    });
+
+    try {
+      expect.soft(result.error).toMatchObject({
+        code: "PROVIDER_RESULT_INVALID",
+      });
+      expect.soft(result.secondError).toMatchObject({
+        code: "PREFLIGHT_CALL_LIMIT_REACHED",
+      });
+      expect
+        .soft(
+          result.fetchMock.mock.calls.filter(
+            ([, request]) => request?.method === "POST",
+          ),
+        )
+        .toHaveLength(1);
+      await expect
+        .soft(readFile(resolve(privateRoot, guardedRunId, "result.json")))
+        .rejects.toThrow();
+    } finally {
+      await removeSession(guardedRunId);
+    }
+  });
+
+  it("rejects a completed response without a structured result", async () => {
+    await removeSession(guardedRunId);
+    const result = await runGuardedCli({
+      apiKey,
+      phone,
+      fetchMock: fakeFetchWithCallResponse(async () =>
+        jsonResponse(await fixture("completed-missing-result.json")),
+      ),
+    });
+
+    try {
+      expect(result.error).toMatchObject({ code: "PROVIDER_RESULT_INVALID" });
+      await expect(
+        readFile(resolve(privateRoot, guardedRunId, "result.json")),
+      ).rejects.toThrow();
+    } finally {
+      await removeSession(guardedRunId);
+    }
+  });
+
+  it("rejects a reached result without a user transcript turn", async () => {
+    await removeSession(guardedRunId);
+    const result = await runGuardedCli({
+      apiKey,
+      phone,
+      fetchMock: fakeFetchWithCallResponse(async () =>
+        completedFixtureResponse((resource) => {
+          const attempts = resource.recipients[0]?.attempts;
+          if (attempts?.[0] === undefined) {
+            throw new Error("Expected the completed fixture attempt");
+          }
+          attempts[0].transcript_turns = attempts[0].transcript_turns.filter(
+            (turn) => turn.speaker === "bot",
+          );
+        }),
+      ),
+    });
+
+    try {
+      expect(result.error).toMatchObject({ code: "PROVIDER_RESULT_INVALID" });
+      await expect(
+        readFile(resolve(privateRoot, guardedRunId, "result.json")),
+      ).rejects.toThrow();
+    } finally {
+      await removeSession(guardedRunId);
+    }
+  });
+
+  it("rejects a provider outcome that mismatches the answered scenario", async () => {
+    await removeSession(guardedRunId);
+    const result = await runGuardedCli({
+      apiKey,
+      phone,
+      fetchMock: fakeFetchWithCallResponse(async () =>
+        completedFixtureResponse((resource) => {
+          const structuredResult = resource.recipients[0]?.structured_result;
+          if (structuredResult === null || structuredResult === undefined) {
+            throw new Error("Expected the completed fixture structured result");
+          }
+          structuredResult.contact_outcome = "declined";
+        }),
+      ),
+    });
+
+    try {
+      expect(result.error).toMatchObject({ code: "PROVIDER_RESULT_INVALID" });
+      await expect(
+        readFile(resolve(privateRoot, guardedRunId, "result.json")),
+      ).rejects.toThrow();
+    } finally {
+      await removeSession(guardedRunId);
     }
   });
 
