@@ -78,17 +78,36 @@ describe("CalleClient createCall", () => {
     });
   });
 
-  it("calls AbortSignal.timeout with exactly 15 seconds", async () => {
+  it("bounds the one create request to exactly 30 seconds", async () => {
     const timeout = vi.spyOn(AbortSignal, "timeout");
     const fetchMock = vi.fn<typeof fetch>(async () =>
       jsonResponse(await fixture("create-accepted.json"), 201),
     );
 
-    await createClient(fetchMock).createCall(input);
+    try {
+      await createClient(fetchMock).createCall(input);
 
-    expect(timeout).toHaveBeenCalledTimes(1);
-    expect(timeout).toHaveBeenCalledWith(15_000);
-    timeout.mockRestore();
+      expect(timeout).toHaveBeenCalledTimes(1);
+      expect(timeout).toHaveBeenCalledWith(30_000);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
+  it("reports a create timeout as ambiguous after exactly one POST", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => {
+      throw new DOMException("Timed out", "TimeoutError");
+    });
+
+    await expect(
+      createClient(fetchMock).createCall(input),
+    ).rejects.toMatchObject({
+      code: "CALL_OUTCOME_PENDING",
+      kind: "ambiguous_create",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBe("POST");
   });
 
   it.each([200, 202, 204])(
@@ -296,6 +315,27 @@ describe("CalleClient createCall", () => {
 });
 
 describe("CalleClient bounded GET behavior", () => {
+  it("keeps call and event reads bounded to exactly 15 seconds", async () => {
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    const fetchMock = vi.fn<typeof fetch>(async (url) =>
+      String(url).endsWith("/events")
+        ? jsonResponse(await fixture("events-page.json"))
+        : jsonResponse(await fixture("completed-valid.json")),
+    );
+    const client = createClient(fetchMock);
+
+    try {
+      await client.getCall("call_demo_001");
+      await client.listEvents("call_demo_001");
+
+      expect(timeout.mock.calls.map(([milliseconds]) => milliseconds)).toEqual([
+        15_000, 15_000,
+      ]);
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
   it("retries a transient call read only twice with the approved delays", async () => {
     const fetchMock = vi
       .fn<typeof fetch>()
