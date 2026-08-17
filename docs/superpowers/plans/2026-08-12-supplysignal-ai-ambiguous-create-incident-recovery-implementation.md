@@ -19,8 +19,10 @@ repository checks.
 
 - The approved authority is
   `docs/superpowers/specs/2026-08-11-supplysignal-ai-ambiguous-create-incident-recovery-design.md`.
-- Keep the runtime, API routes, domain types, persistence schema, dependencies,
-  provider configuration, 15-second create timeout, and CI unchanged.
+Correction A21 supersedes only the create-response timeout: the single POST may
+wait 30 seconds, while GET call/events remain bounded to 15 seconds. Every A20
+no-retry, no-redial, manual no-ID recovery, and incident-classification rule
+remains unchanged.
 - Preserve the absolute one-create-POST boundary from Correction A12.1.
 - A later `CALL_STARTING` or `RECONCILING` invocation without a stored
   Developer API `call_id` performs no provider request and requires manual

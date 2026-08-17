@@ -41,6 +41,25 @@ therefore not a Task 8 PASS, and Task 9 remains blocked.
   an authoritative `call_id` plus a terminal GET result consistent with human
   observation.
 
+## Support recovery
+
+CALL-E support later recovered the authoritative Developer API record. The
+provider reported a completed Ukrainian call and indicated that call planning
+took approximately 20 seconds, longer than the application's former 15-second
+create-response wait. Audio was unavailable.
+
+The normalized structured result was not mechanically trustworthy: confirmed
+quantity was 500, while available and delayed quantities were 17 and 5. The
+private transcript also contained an explicit refusal of manager contact while
+the structured result marked human follow-up as required. The full call ID,
+transcript, account identity, participant phone, and support trace remain
+private.
+
+This recovery confirms the ambiguous-create diagnosis and motivates Correction
+A21. It does not convert the incident into a Task 8 PASS. The recovered result
+fails deterministic quantity reconciliation and requires human review that is
+outside Task 8.
+
 ## Privacy
 
 This record excludes the full phone number, participant identity, consent

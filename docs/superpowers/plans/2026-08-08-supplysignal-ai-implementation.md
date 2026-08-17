@@ -1024,7 +1024,7 @@ export function buildCreateCallRequest(input: CreateSupplierCall) {
 
 - [ ] **Step 5: Implement the bounded HTTP client**
 
-Use injected `fetch`, `AbortSignal.timeout(15_000)`, `Authorization: Bearer <server-only key>`, `Content-Type: application/json`, and `Idempotency-Key` on create. Do not retry `POST /v1/calls`. Permit at most two reads for transient GET failures with delays `500ms` and `1,000ms`; retries must reuse the same URL and cannot mutate external state.
+Use injected `fetch`, `AbortSignal.timeout(30_000)`, `Authorization: Bearer <server-only key>`, `Content-Type: application/json`, and `Idempotency-Key` on create. Keep `GET /v1/calls/{call_id}` and `GET /v1/calls/{call_id}/events` bounded by `AbortSignal.timeout(15_000)`. Do not retry `POST /v1/calls`. Permit at most two reads for transient GET failures with delays `500ms` and `1,000ms`; retries must reuse the same URL and cannot mutate external state.
 
 ```ts
 const response = await fetch(`${baseUrl}/v1/calls`, {
@@ -1035,7 +1035,7 @@ const response = await fetch(`${baseUrl}/v1/calls`, {
     "idempotency-key": input.idempotencyKey,
   },
   body: JSON.stringify(buildCreateCallRequest(input)),
-  signal: AbortSignal.timeout(15_000),
+  signal: AbortSignal.timeout(30_000),
 });
 ```
 
@@ -1173,6 +1173,8 @@ git commit -m "feat: reconcile one CALL-E call safely"
 **Files:**
 - Create: `scripts/live-preflight.ts`
 - Create: `scripts/live-preflight.test.ts`
+- Create: `src/domain/preflight-integrity.ts`
+- Create: `src/domain/preflight-integrity.test.ts`
 - Create: `docs/operator-runbook.md`
 - Create after successful preflight: `docs/verification/call-e-preflight.md`
 - Private ignored output: `tmp/preflight-private/`
@@ -1187,7 +1189,17 @@ Test missing `CALLE_API_KEY`, missing `SUPPLIER_TEST_PHONE`, unsupported or
 malformed recipient profiles, missing or invalid Ukraine language selection,
 cross-profile mismatches, non-interactive execution, absent exact confirmation
 phrase, invalid scenario, and any attempt to run more than one call per
-process. Valid Kenya and Ukraine profiles remain accepted.
+process. Valid Kenya and Ukraine profiles remain accepted. Add pure integrity
+tests for answered, declined, and no-answer evidence, including arithmetic
+reconciliation, a non-empty user turn for answered/declined, the exact
+no-answer sentinel, scenario/outcome mismatches, strict plain-data rejection,
+and bounded `PROVIDER_RESULT_INVALID` output.
+
+At the composition seam, prove that an invalid completed provider result makes
+exactly one create POST, returns only `PROVIDER_RESULT_INVALID`, leaves the
+process-global one-call permit consumed, and publishes no successful private
+evidence. Stored-ID reconciliation remains GET-only; no integrity failure may
+retry, redial, or create a replacement call.
 
 - [ ] **Step 2: Run and observe expected failures**
 
@@ -1203,7 +1215,11 @@ argument. It composes the recipient through `createCallRecipient`, validates
 the resulting complete value through `callRecipientSchema`, displays the
 scenario, mask, canonical country, language, region, and locale, then requires
 the operator to type exactly `AUTHORIZE ONE CALL`. It writes raw results only
-under ignored `tmp/preflight-private/` and prints a sanitized summary.
+under ignored `tmp/preflight-private/` and prints a sanitized summary. After
+terminal reconciliation and before reporting success, pass the named scenario
+and normalized provider snapshot through the pure A21 integrity gate. A failed
+gate preserves the private run, consumes the one-call permit, publishes no
+success artifact, and exits nonzero with only `PROVIDER_RESULT_INVALID`.
 
 ```ts
 const scenario = scenarioSchema.parse(readScenario(process.argv));
@@ -1294,6 +1310,12 @@ owner-approved amendment.
 Do not mark the Ukrainian observation or any other no-ID call as passing. Keep
 Task 9 blocked, and retain that hard stop until an authoritative `call_id` and
 terminal GET resource support a separately authorized preflight.
+
+Task 9 remains blocked until three new scenarios—`answered`, `declined`, and
+`no_answer`—each receive separate owner authorization and satisfy the approved
+A21 evidence gate, including authoritative API IDs, terminal GET results,
+physical observations consistent with provider evidence, pure integrity
+validation, and operator review of transcript-versus-structured follow-up.
 
 ```bash
 git add docs/verification/call-e-preflight.md
@@ -2274,6 +2296,7 @@ Verify the public repository, Apache 2.0 license at root, public replay, public 
 | 12. Public surfaces contain no unapproved personal data | 11, 14, 16, 17, 18 |
 | 13. OpenAPI 0.6.0, canonical supported recipient profiles, fail-closed statuses | 2, 6, 7, 8, 13 |
 | 14. CLI/MCP/OAuth cache excluded from runtime and deployment | 1, 8, 12, 16, 17 |
+| A21. Split create/read timeouts, bilingual clarification semantics, and the pure preflight integrity boundary | 6, 8 |
 
 ## Execution Gates
 

@@ -23,6 +23,14 @@ before any interactive wait. The harness:
 - stores private run evidence only below the repository-anchored, ignored
   `tmp/preflight-private/<run-id>/` directory.
 
+- The single create POST waits up to 30 seconds for its response. Call and event
+  reads remain bounded to 15 seconds. The longer create wait is not a retry or
+  redial permission.
+- `PROVIDER_RESULT_INVALID` means a terminal provider snapshot failed the
+  mechanical Task 8 integrity boundary. Preserve the private run, do not publish
+  a success artifact, do not retry or redial, record the scenario as failed, and
+  escalate only sanitized facts.
+
 | Country       | Strict E.164 pattern | Display mask       | Region | Locale  | Language  |
 | ------------- | -------------------- | ------------------ | ------ | ------- | --------- |
 | United States | `^\+1[2-9]\d{9}$`    | `+1 ***-***-1234`  | `US`   | `en-US` | English   |
@@ -201,6 +209,27 @@ through Node's filesystem APIs; it does not claim protection from an arbitrary
 hostile process with equivalent account and filesystem privileges. Keep the
 repository private during the preflight and do not grant another process write
 access to these directories.
+
+## Provider result integrity checklist
+
+Before accepting a terminal result as Task 8 evidence, verify all of the
+following against the private run:
+
+1. Confirm that `availableQuantity + delayedQuantity` exactly equals
+   `confirmedQuantity`.
+2. For `answered` and `declined`, confirm that the transcript contains at least
+   one bounded, non-empty user turn.
+3. For `no_answer`, require the exact sentinel: `contactOutcome` is
+   `no_answer`; all three quantities are zero; `promisedDeliveryDate`,
+   `delayReason`, `followUpRequired`, and `unableToFulfill` are `unknown`;
+   `taskCompleted` is `false`; `completionConfidence` is `null`; and the
+   transcript and evidence are empty.
+4. Compare the private transcript with the structured `followUpRequired` value.
+   An explicit request for human contact requires `yes`, an explicit refusal
+   requires `no`, and an unstated answer requires `unknown`.
+
+Any arithmetic, transcript, scenario, or follow-up conflict fails the scenario.
+Preserve the private run, publish no success artifact, and keep Task 9 blocked.
 
 The directory is Git-ignored. Do not move its contents into `docs/`,
 `examples/`, screenshots, the public replay, or the demo video. The later
