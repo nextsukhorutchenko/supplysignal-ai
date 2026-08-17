@@ -23,6 +23,14 @@ before any interactive wait. The harness:
 - stores private run evidence only below the repository-anchored, ignored
   `tmp/preflight-private/<run-id>/` directory.
 
+- The single create POST waits up to 30 seconds for its response. Call and event
+  reads remain bounded to 15 seconds. The longer create wait is not a retry or
+  redial permission.
+- `PROVIDER_RESULT_INVALID` means a terminal provider snapshot failed the
+  mechanical Task 8 integrity boundary. Preserve the private run, do not publish
+  a success artifact, do not retry or redial, record the scenario as failed, and
+  escalate only sanitized facts.
+
 | Country       | Strict E.164 pattern | Display mask       | Region | Locale  | Language  |
 | ------------- | -------------------- | ------------------ | ------ | ------- | --------- |
 | United States | `^\+1[2-9]\d{9}$`    | `+1 ***-***-1234`  | `US`   | `en-US` | English   |
@@ -41,9 +49,8 @@ Kenyan or Ukrainian live preflight, perform a same-day check that the
 still lists `KE + English` or `UA + selected language`, respectively, as
 supported.
 
-Do not rerun a scenario to recover from a timeout or an empty CALL-E Dashboard.
-An ambiguous response may still mean that the provider created the call. Keep
-the private run directory intact and resolve the existing call manually.
+For a timeout or an ambiguous CALL-E response, follow
+[Ambiguous create without a Developer API call ID](#ambiguous-create-without-a-developer-api-call-id).
 
 ## Before each scenario
 
@@ -203,6 +210,27 @@ hostile process with equivalent account and filesystem privileges. Keep the
 repository private during the preflight and do not grant another process write
 access to these directories.
 
+## Provider result integrity checklist
+
+Before accepting a terminal result as Task 8 evidence, verify all of the
+following against the private run:
+
+1. Confirm that `availableQuantity + delayedQuantity` exactly equals
+   `confirmedQuantity`.
+2. For `answered` and `declined`, confirm that the transcript contains at least
+   one bounded, non-empty user turn.
+3. For `no_answer`, require the exact sentinel: `contactOutcome` is
+   `no_answer`; all three quantities are zero; `promisedDeliveryDate`,
+   `delayReason`, `followUpRequired`, and `unableToFulfill` are `unknown`;
+   `taskCompleted` is `false`; `completionConfidence` is `null`; and the
+   transcript and evidence are empty.
+4. Compare the private transcript with the structured `followUpRequired` value.
+   An explicit request for human contact requires `yes`, an explicit refusal
+   requires `no`, and an unstated answer requires `unknown`.
+
+Any arithmetic, transcript, scenario, or follow-up conflict fails the scenario.
+Preserve the private run, publish no success artifact, and keep Task 9 blocked.
+
 The directory is Git-ignored. Do not move its contents into `docs/`,
 `examples/`, screenshots, the public replay, or the demo video. The later
 public preflight report may contain only an allowlisted projection: scenario,
@@ -224,10 +252,45 @@ context, and the final pass/fail decision.
   Kenya, or set it to exactly `English` or `Ukrainian` for Ukraine. Do not
   authorize until the displayed country, language, region, and locale are
   correct.
-- `CALL_OUTCOME_PENDING`: do not rerun the harness. Preserve private state and
-  reconcile or escalate the existing call. This includes bounded polling that
-  ended while the call was still active and event pagination that remained
-  incomplete after its safety limit; neither case prints a successful result.
+
+### Ambiguous create without a Developer API call ID
+
+If the one authorized `POST /v1/calls` returns `CALL_OUTCOME_PENDING` and the
+private run has no Developer API `call_id`, the call may still ring, connect,
+complete, or be billed. Do not rerun the harness, reset the permit, generate a
+new idempotency key, or place another call for that run.
+
+1. Preserve the private run directory and immutable run history.
+2. Start a 10-minute observation window from the timeout or ambiguous response.
+3. Monitor the consenting recipient's phone for a ring, conversation, delayed
+   call, or duplicate call.
+4. Review Billing and Call Records as informational surfaces. An empty screen
+   does not prove that no call occurred.
+5. Record approximate UTC timestamps, canonical country/language/region/locale,
+   masked phone, observed duration and cost, physical outcome, visibility, and
+   whether a delayed or duplicate call occurred.
+6. If an authoritative Developer API `call_id` becomes available, continue
+   GET-only reconciliation for that identifier.
+7. If a call or charge exists without a Developer API `call_id`, leave the run
+   in `RECONCILING` and escalate privately to CALL-E support.
+8. If nothing is observed after 10 minutes, keep the run unresolved and request
+   a separate owner decision. Never reuse this run or authorization.
+
+The 10-minute period is observation only. It is not a retry window and does not
+authorize polling an unknown identifier or making another provider request.
+
+| Identifier              | Use                                                                      |
+| ----------------------- | ------------------------------------------------------------------------ |
+| Developer API `call_id` | Authoritative GET reconciliation and event retrieval                     |
+| SupplySignal AI run ID  | Local workflow and persistence only                                      |
+| MCP or CLI identifier   | Informational unless explicitly confirmed as the Developer API `call_id` |
+| Billing reference       | Private support context only; never submit or guess it as `call_id`      |
+
+- `CALL_OUTCOME_PENDING` with a stored Developer API `call_id`: preserve
+  private state and continue GET-only reconciliation. This includes bounded
+  polling that ended while the call was still active and event pagination that
+  remained incomplete after its safety limit; neither case prints a successful
+  result.
 - If `CALL_OUTCOME_PENDING` leaves both `result.json` and a
   `.result-*.tmp` file, treat both links as incomplete private state. Do not
   delete only the temporary name: that could make an uncommitted result appear
@@ -251,8 +314,10 @@ reconciliation authority; events and Dashboard visibility are informational.
 When escalating privately to CALL-E support, provide the call identifier,
 approximate timestamp and timezone, recipient country and language, OpenAPI
 version, sanitized expected and actual behavior, and whether the issue occurred
-through the API or Dashboard. Never include the API key or full phone number in
-a public channel.
+through the API or Dashboard. For a no-`call_id` incident, provide the full
+Billing reference only in the private support channel; public reports may
+include no more than a masked suffix. Never include the API key or full phone
+number in a public channel.
 
 ## Credential cleanup
 

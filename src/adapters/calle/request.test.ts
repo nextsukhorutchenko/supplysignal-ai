@@ -60,8 +60,11 @@ const expectedEnglishTask = [
   "After the complete disclosure, keep each spoken turn concise and natural: one or two short sentences. Ask only one question at a time and wait for the recipient's answer. Do not read the entire purchase order at once or repeat facts the recipient has already confirmed.",
   "Ask about fictional purchase order PO-2048 from Northstar Components.",
   "Confirm the quantity expected (500), quantity ready now, quantity delayed, and promised delivery date relative to 2026-08-15.",
+  "Collect the confirmed quantity, quantity available now, and quantity delayed as three separate answers.",
+  "If those three quantities do not reconcile, repeat all three values and ask exactly one clarification question. Never calculate, repair, or invent a quantity for the recipient.",
+  "Set human follow-up to yes only after an explicit request for a manager, transfer, callback, or other human follow-up. Set it to no after an explicit refusal of human follow-up. Use unknown when the conversation does not establish the answer.",
   "Ask for the delay reason, whether human follow-up is required, and whether the supplier is unable to fulfill the order.",
-  "If the recipient declines, stop politely and do not invent answers. If nobody answers, do not infer supplier facts.",
+  "If the recipient explicitly refuses to continue the conversation, stop politely and do not invent answers. If nobody answers, do not infer supplier facts.",
 ].join("\n");
 const expectedUkrainianTask = [
   "Ви — SupplySignal AI, автоматизований агент для телефонних дзвінків.",
@@ -69,8 +72,11 @@ const expectedUkrainianTask = [
   "Після повного повідомлення говоріть стисло й природно: одне або два короткі речення. Ставте лише одне питання за раз і дочекайтеся відповіді. Не зачитуйте все замовлення одразу та не повторюйте вже підтверджені факти.",
   "Запитайте про вигадане замовлення на закупівлю PO-2048 від Northstar Components.",
   "Підтвердьте очікувану кількість (500), кількість, готову зараз, кількість із затримкою та обіцяну дату поставки відносно 2026-08-15.",
+  "Отримайте окремі відповіді про підтверджену кількість, кількість, доступну зараз, і кількість із затримкою.",
+  "Якщо ці три кількості не узгоджуються, повторіть усі три значення та поставте рівно одне уточнювальне питання. Ніколи не обчислюйте, не виправляйте й не вигадуйте кількість замість співрозмовника.",
+  "Позначайте потребу у зв’язку з людиною як yes лише після прямого прохання про менеджера, переведення дзвінка, зворотний дзвінок або інший контакт із людиною. Позначайте no після прямої відмови від такого контакту. Використовуйте unknown, якщо розмова не встановила відповідь.",
   "Запитайте про причину затримки, потребу у зв’язку з менеджером і чи може постачальник виконати замовлення.",
-  "Якщо співрозмовник відмовляється, ввічливо завершіть розмову й не вигадуйте відповіді. Якщо ніхто не відповідає, не робіть висновків про факти щодо постачальника.",
+  "Якщо співрозмовник прямо відмовляється продовжувати розмову, ввічливо завершіть її й не вигадуйте відповіді. Якщо ніхто не відповідає, не робіть висновків про факти щодо постачальника.",
 ].join("\n");
 const mandatoryDisclosure =
   "Immediately disclose that this is an AI-assisted fictional supplier demo and that the call may be recorded for an approved hackathon demonstration.";
@@ -78,6 +84,28 @@ const conciseTurnInstruction =
   "After the complete disclosure, keep each spoken turn concise and natural: one or two short sentences. Ask only one question at a time and wait for the recipient's answer. Do not read the entire purchase order at once or repeat facts the recipient has already confirmed.";
 const firstPurchaseOrderQuestion =
   "Ask about fictional purchase order PO-2048 from Northstar Components.";
+const englishEvidenceCollectionRules = [
+  "Collect the confirmed quantity, quantity available now, and quantity delayed as three separate answers.",
+  "If those three quantities do not reconcile, repeat all three values and ask exactly one clarification question. Never calculate, repair, or invent a quantity for the recipient.",
+  "Set human follow-up to yes only after an explicit request for a manager, transfer, callback, or other human follow-up. Set it to no after an explicit refusal of human follow-up. Use unknown when the conversation does not establish the answer.",
+] as const;
+const ukrainianEvidenceCollectionRules = [
+  "Отримайте окремі відповіді про підтверджену кількість, кількість, доступну зараз, і кількість із затримкою.",
+  "Якщо ці три кількості не узгоджуються, повторіть усі три значення та поставте рівно одне уточнювальне питання. Ніколи не обчислюйте, не виправляйте й не вигадуйте кількість замість співрозмовника.",
+  "Позначайте потребу у зв’язку з людиною як yes лише після прямого прохання про менеджера, переведення дзвінка, зворотний дзвінок або інший контакт із людиною. Позначайте no після прямої відмови від такого контакту. Використовуйте unknown, якщо розмова не встановила відповідь.",
+] as const;
+
+function expectEvidenceCollectionRulesOnce(
+  task: string,
+  rules: readonly string[],
+): void {
+  const taskLines = task.split("\n");
+
+  for (const rule of rules) {
+    expect(taskLines.filter((line) => line === rule)).toHaveLength(1);
+  }
+  expect(task.length).toBeLessThanOrEqual(4_000);
+}
 
 function expectBoundedCreationFailure(
   createRequest: () => unknown,
@@ -116,7 +144,7 @@ describe("buildCreateCallRequest", () => {
       taskLines.indexOf(conciseTurnInstruction) + 1,
     );
     expect(task).toContain(
-      "If the recipient declines, stop politely and do not invent answers.",
+      "If the recipient explicitly refuses to continue the conversation, stop politely and do not invent answers.",
     );
     expect(task).toContain("If nobody answers, do not infer supplier facts.");
     expect(task.length).toBeLessThanOrEqual(4_000);
@@ -156,9 +184,10 @@ describe("buildCreateCallRequest", () => {
   it.each([input, kenyaInput, ukraineEnglishInput])(
     "keeps the approved English task unchanged for $recipient.locale",
     (profileInput) => {
-      expect(buildCreateCallRequest(profileInput).task).toBe(
-        expectedEnglishTask,
-      );
+      const { task } = buildCreateCallRequest(profileInput);
+
+      expect(task).toBe(expectedEnglishTask);
+      expectEvidenceCollectionRulesOnce(task, englishEvidenceCollectionRules);
     },
   );
 
@@ -167,14 +196,23 @@ describe("buildCreateCallRequest", () => {
     const taskLines = request.task.split("\n");
 
     expect(request.task).toBe(expectedUkrainianTask);
-    expect(request.task.length).toBeLessThanOrEqual(4_000);
+    expectEvidenceCollectionRulesOnce(
+      request.task,
+      ukrainianEvidenceCollectionRules,
+    );
     expect(request.recipient_result_schema).toBe(recipientResultSchema);
     expect(request.metadata).toEqual({ workflow_run_id: "run_001" });
     expect(taskLines.indexOf(expectedUkrainianTask.split("\n")[1])).toBe(1);
     expect(taskLines.indexOf(expectedUkrainianTask.split("\n")[2])).toBe(2);
     expect(taskLines.indexOf(expectedUkrainianTask.split("\n")[3])).toBe(3);
     expect(request.task.match(/відмовляється/g)).toHaveLength(1);
-    expect(request.task.match(/не вигадуйте/g)).toHaveLength(1);
+    expect(
+      taskLines.filter(
+        (line) =>
+          line ===
+          "Якщо співрозмовник прямо відмовляється продовжувати розмову, ввічливо завершіть її й не вигадуйте відповіді. Якщо ніхто не відповідає, не робіть висновків про факти щодо постачальника.",
+      ),
+    ).toHaveLength(1);
   });
 
   it("uses the exact strict supplier-result contract", () => {

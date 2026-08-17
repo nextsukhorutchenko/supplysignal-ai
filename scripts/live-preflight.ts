@@ -31,6 +31,7 @@ import {
   type RecipientLanguage,
 } from "../src/domain/call-recipient.js";
 import { AppError } from "../src/domain/errors.js";
+import { validatePreflightEvidenceIntegrity } from "../src/domain/preflight-integrity.js";
 import {
   runRecordSchema,
   transitionRun,
@@ -72,6 +73,7 @@ type PreflightErrorCode =
   | "AUTHORIZATION_REQUIRED"
   | "UNSUPPORTED_RECIPIENT_REGION"
   | "UNSUPPORTED_RECIPIENT_LANGUAGE"
+  | "PROVIDER_RESULT_INVALID"
   | "CALL_OUTCOME_PENDING";
 
 export class PreflightError extends Error {
@@ -583,6 +585,17 @@ async function executeLivePreflight(input: PreflightExecutionInput): Promise<{
   ) {
     fail("CALL_OUTCOME_PENDING");
   }
+  if (current.providerSnapshot === undefined) {
+    fail("PROVIDER_RESULT_INVALID");
+  }
+  try {
+    validatePreflightEvidenceIntegrity(
+      input.scenario,
+      current.providerSnapshot,
+    );
+  } catch {
+    fail("PROVIDER_RESULT_INVALID");
+  }
   const events = await collectEvents(calle, current.callId);
   return { result: { run: current, events }, privateSession };
 }
@@ -870,7 +883,10 @@ if (
 ) {
   runCliPreflight().catch((error: unknown) => {
     const code =
-      error instanceof PreflightError ? error.code : "CALL_OUTCOME_PENDING";
+      error instanceof PreflightError ||
+      (error instanceof AppError && error.code === "PROVIDER_RESULT_INVALID")
+        ? error.code
+        : "CALL_OUTCOME_PENDING";
     process.stderr.write(`${code}\n`);
     process.exitCode = 1;
   });

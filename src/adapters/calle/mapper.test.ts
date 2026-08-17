@@ -85,6 +85,36 @@ describe("mapCallResource", () => {
     });
   });
 
+  it("preserves unreconciled supplier quantities for domain integrity validation", async () => {
+    const completed = (await fixture("completed-valid.json")) as Record<
+      string,
+      unknown
+    >;
+    const completedRecipient = (
+      completed.recipients as Record<string, unknown>[]
+    )[0] as Record<string, unknown>;
+    const snapshot = mapCallResource({
+      ...completed,
+      recipients: [
+        {
+          ...completedRecipient,
+          structured_result: {
+            ...(completedRecipient.structured_result as object),
+            confirmed_quantity: 500,
+            available_quantity: 17,
+            delayed_quantity: 5,
+          },
+        },
+      ],
+    });
+
+    expect(snapshot.structuredResult).toMatchObject({
+      confirmedQuantity: 500,
+      availableQuantity: 17,
+      delayedQuantity: 5,
+    });
+  });
+
   it("rejects a terminal resource with a null structured result", async () => {
     const resource = await fixture("completed-missing-result.json");
 

@@ -9,7 +9,8 @@ import { prepareCreateCallRequest } from "./request.js";
 import { mapCallResource, mapEventsPage } from "./mapper.js";
 import { MAX_CALLE_RESPONSE_BYTES } from "./schemas.js";
 
-const REQUEST_TIMEOUT_MILLISECONDS = 15_000;
+const CREATE_REQUEST_TIMEOUT_MILLISECONDS = 30_000;
+const READ_REQUEST_TIMEOUT_MILLISECONDS = 15_000;
 const GET_RETRY_DELAYS = [500, 1_000] as const;
 const MAX_API_KEY_LENGTH = 4_000;
 const MAX_CALL_ID_LENGTH = 128;
@@ -223,7 +224,7 @@ export class CalleClient implements CalleGateway {
         },
         body,
         redirect: "error",
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MILLISECONDS),
+        signal: AbortSignal.timeout(CREATE_REQUEST_TIMEOUT_MILLISECONDS),
       });
     } catch {
       throw error("CALL_OUTCOME_PENDING", "ambiguous_create");
@@ -291,7 +292,7 @@ export class CalleClient implements CalleGateway {
           method: "GET",
           headers: { authorization: `Bearer ${this.apiKey}` },
           redirect: "error",
-          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MILLISECONDS),
+          signal: AbortSignal.timeout(READ_REQUEST_TIMEOUT_MILLISECONDS),
         });
       } catch {
         if (attempt < GET_RETRY_DELAYS.length) {

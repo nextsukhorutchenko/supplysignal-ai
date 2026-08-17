@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import {
   mkdir,
   mkdtemp,
@@ -101,8 +102,154 @@ function jsonResponse(body: string, status = 200): Response {
   });
 }
 
+type CompletedCallFixture = {
+  recipients: {
+    structured_result: Record<string, unknown> | null;
+    attempts: { transcript_turns: Record<string, unknown>[] }[];
+  }[];
+};
+
+async function completedFixtureResponse(
+  modify: (resource: CompletedCallFixture) => void,
+): Promise<Response> {
+  const resource = JSON.parse(
+    await fixture("completed-valid.json"),
+  ) as CompletedCallFixture;
+  modify(resource);
+  return jsonResponse(JSON.stringify(resource));
+}
+
+async function inconsistentCompletedResponse(): Promise<Response> {
+  return completedFixtureResponse((resource) => {
+    const structuredResult = resource.recipients[0]?.structured_result;
+    if (structuredResult === null || structuredResult === undefined) {
+      throw new Error("Expected the completed fixture structured result");
+    }
+    structuredResult.available_quantity = 17;
+    structuredResult.delayed_quantity = 5;
+  });
+}
+
+function fakeFetchWithCallResponse(
+  callResponse: () => Promise<Response>,
+): typeof fetch {
+  return async (url, init) => {
+    if (init?.method === "POST") {
+      return jsonResponse(await fixture("create-accepted.json"), 201);
+    }
+    if (String(url).endsWith("/events")) {
+      return jsonResponse(await fixture("events-page.json"));
+    }
+    return callResponse();
+  };
+}
+
 async function removeSession(runId: string): Promise<void> {
   await rm(resolve(privateRoot, runId), { recursive: true, force: true });
+}
+
+async function directoryNames(path: string): Promise<string[]> {
+  try {
+    return await readdir(path);
+  } catch (error: unknown) {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      return [];
+    }
+    throw error;
+  }
+}
+
+type EntrypointProcessResult = {
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  stdout: string;
+  stderr: string;
+};
+
+async function runCompletedWithoutResultEntrypoint(): Promise<EntrypointProcessResult> {
+  const scriptPath = fileURLToPath(
+    new URL("./live-preflight.ts", import.meta.url),
+  );
+  const [accepted, completedWithoutResult, events] = await Promise.all([
+    fixture("create-accepted.json"),
+    fixture("completed-missing-result.json"),
+    fixture("events-page.json"),
+  ]);
+  const bootstrap = [
+    'import { pathToFileURL } from "node:url";',
+    `const scriptPath = ${JSON.stringify(scriptPath)};`,
+    `const accepted = ${JSON.stringify(accepted)};`,
+    `const completedWithoutResult = ${JSON.stringify(completedWithoutResult)};`,
+    `const events = ${JSON.stringify(events)};`,
+    "let postCount = 0;",
+    `process.argv = [process.execPath, scriptPath, "--scenario", "answered"];`,
+    `process.env.CALLE_API_KEY = ${JSON.stringify(apiKey)};`,
+    `process.env.SUPPLIER_TEST_PHONE = ${JSON.stringify(phone)};`,
+    "delete process.env.SUPPLIER_TEST_LANGUAGE;",
+    'Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true });',
+    'Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });',
+    "globalThis.fetch = async (url, init) => {",
+    '  if (init?.method === "POST") {',
+    "    postCount += 1;",
+    '    return new Response(accepted, { status: 201, headers: { "content-type": "application/json" } });',
+    "  }",
+    '  const body = String(url).endsWith("/events") ? events : completedWithoutResult;',
+    '  return new Response(body, { status: 200, headers: { "content-type": "application/json" } });',
+    "};",
+    'process.on("exit", () => process.stdout.write("TEST_POST_COUNT=" + postCount + "\\n"));',
+    "await import(pathToFileURL(scriptPath).href);",
+  ].join("\n");
+  const childEnvironment = Object.fromEntries(
+    [
+      "COMSPEC",
+      "HOME",
+      "LOCALAPPDATA",
+      "PATH",
+      "PATHEXT",
+      "SystemRoot",
+      "TEMP",
+      "TMP",
+      "USERPROFILE",
+      "WINDIR",
+    ].flatMap((name) => {
+      const value = process.env[name];
+      return value === undefined ? [] : [[name, value]];
+    }),
+  );
+  const child = spawn(
+    process.execPath,
+    ["--import", "tsx", "--input-type=module", "--eval", bootstrap],
+    {
+      cwd: repositoryRoot,
+      env: { ...childEnvironment, NODE_ENV: "test", NO_COLOR: "1" },
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    },
+  );
+
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => {
+    stdout += chunk;
+  });
+  child.stderr.on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+  child.stdin.end("AUTHORIZE ONE CALL\n");
+
+  return new Promise<EntrypointProcessResult>((resolvePromise, reject) => {
+    child.once("error", reject);
+    child.once("close", (exitCode, signal) => {
+      resolvePromise({ exitCode, signal, stdout, stderr });
+    });
+  });
 }
 
 const runUuid = "11111111-1111-4111-8111-111111111111";
@@ -116,6 +263,7 @@ type GuardedCliOptions = {
   phrase?: string;
   interactive?: boolean;
   fetchMock?: typeof fetch;
+  runSecondAttempt?: boolean;
   mockFileSystem?: (
     actual: typeof import("node:fs/promises"),
   ) => Partial<typeof import("node:fs/promises")>;
@@ -123,6 +271,7 @@ type GuardedCliOptions = {
 
 type GuardedCliResult = {
   error: unknown;
+  secondError: unknown;
   output: string;
   fetchMock: ReturnType<typeof vi.fn<typeof fetch>>;
   promptMock: ReturnType<typeof vi.fn>;
@@ -221,11 +370,21 @@ async function runGuardedCli(
   vi.stubGlobal("fetch", fetchMock);
 
   let error: unknown;
+  let secondError: unknown;
   try {
     const preflightModule = await import("./live-preflight.js");
-    await preflightModule.runCliPreflight();
-  } catch (caught: unknown) {
-    error = caught;
+    try {
+      await preflightModule.runCliPreflight();
+    } catch (caught: unknown) {
+      error = caught;
+    }
+    if (options.runSecondAttempt === true) {
+      try {
+        await preflightModule.runCliPreflight();
+      } catch (caught: unknown) {
+        secondError = caught;
+      }
+    }
   } finally {
     process.argv = originalArgv;
     if (originalApiKey === undefined) {
@@ -262,7 +421,13 @@ async function runGuardedCli(
     vi.doUnmock("node:readline/promises");
     vi.resetModules();
   }
-  return { error, output: output.join(""), fetchMock, promptMock };
+  return {
+    error,
+    secondError,
+    output: output.join(""),
+    fetchMock,
+    promptMock,
+  };
 }
 
 describe("live CALL-E preflight safety boundary", () => {
@@ -622,7 +787,7 @@ describe("live CALL-E preflight safety boundary", () => {
   );
 });
 
-describe("actual offline CLI composition", () => {
+describe.sequential("actual offline CLI composition", () => {
   it("does not export unguarded live execution, writer, or configurable composition", async () => {
     const preflightModule = (await freshModule()) as Record<string, unknown>;
 
@@ -646,7 +811,7 @@ describe("actual offline CLI composition", () => {
     });
     expect(result.fetchMock).not.toHaveBeenCalled();
     await expect(readdir(resolve(privateRoot, guardedRunId))).rejects.toThrow();
-  });
+  }, 30_000);
 
   it.each([
     ["wrong national length", ["+380", "100", "000", "00"].join("")],
@@ -679,6 +844,7 @@ describe("actual offline CLI composition", () => {
         readdir(resolve(privateRoot, guardedRunId)),
       ).rejects.toThrow();
     },
+    30_000,
   );
 
   it.each([
@@ -709,9 +875,10 @@ describe("actual offline CLI composition", () => {
         readdir(resolve(privateRoot, guardedRunId)),
       ).rejects.toThrow();
     },
+    30_000,
   );
 
-  it("uses guarded private composition from an alternate CWD with exactly one POST", async () => {
+  it("accepts the unchanged answered fixture with one guarded POST", async () => {
     await removeSession(guardedRunId);
     const outside = await mkdtemp(resolve(tmpdir(), "supplysignal-preflight-"));
     const originalCwd = process.cwd();
@@ -742,7 +909,150 @@ describe("actual offline CLI composition", () => {
       await removeSession(guardedRunId);
       await rm(outside, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
+
+  it("rejects inconsistent terminal evidence without publication or permit reset", async () => {
+    await removeSession(guardedRunId);
+    const result = await runGuardedCli({
+      apiKey,
+      phone,
+      runSecondAttempt: true,
+      fetchMock: fakeFetchWithCallResponse(inconsistentCompletedResponse),
+    });
+
+    try {
+      expect.soft(result.error).toMatchObject({
+        code: "PROVIDER_RESULT_INVALID",
+      });
+      expect.soft(result.secondError).toMatchObject({
+        code: "PREFLIGHT_CALL_LIMIT_REACHED",
+      });
+      expect
+        .soft(
+          result.fetchMock.mock.calls.filter(
+            ([, request]) => request?.method === "POST",
+          ),
+        )
+        .toHaveLength(1);
+      await expect
+        .soft(readFile(resolve(privateRoot, guardedRunId, "result.json")))
+        .rejects.toThrow();
+    } finally {
+      await removeSession(guardedRunId);
+    }
+  }, 30_000);
+
+  it("rejects a completed response without a structured result", async () => {
+    await removeSession(guardedRunId);
+    const result = await runGuardedCli({
+      apiKey,
+      phone,
+      fetchMock: fakeFetchWithCallResponse(async () =>
+        jsonResponse(await fixture("completed-missing-result.json")),
+      ),
+    });
+
+    try {
+      expect(result.error).toMatchObject({ code: "PROVIDER_RESULT_INVALID" });
+      await expect(
+        readFile(resolve(privateRoot, guardedRunId, "result.json")),
+      ).rejects.toThrow();
+    } finally {
+      await removeSession(guardedRunId);
+    }
+  }, 30_000);
+
+  it("projects completed-without-result failure through the executable entrypoint", async () => {
+    const before = new Set(await directoryNames(privateRoot));
+    let createdSessions: string[] = [];
+
+    try {
+      const result = await runCompletedWithoutResultEntrypoint();
+      createdSessions = (await directoryNames(privateRoot)).filter(
+        (name) => name.startsWith("preflight-answered-") && !before.has(name),
+      );
+
+      expect.soft(result.exitCode).toBe(1);
+      expect.soft(result.signal).toBeNull();
+      expect.soft(result.stdout.match(/TEST_POST_COUNT=1/g)).toHaveLength(1);
+      expect.soft(createdSessions).toHaveLength(1);
+      await expect
+        .soft(
+          readFile(
+            resolve(
+              privateRoot,
+              createdSessions[0] ?? "missing",
+              "result.json",
+            ),
+          ),
+        )
+        .rejects.toThrow();
+      expect.soft(result.stderr).toBe("PROVIDER_RESULT_INVALID\n");
+    } finally {
+      await Promise.all(
+        createdSessions.map((name) =>
+          rm(resolve(privateRoot, name), { recursive: true, force: true }),
+        ),
+      );
+    }
+    for (const name of createdSessions) {
+      await expect(readdir(resolve(privateRoot, name))).rejects.toThrow();
+    }
+  }, 30_000);
+
+  it("rejects a reached result without a user transcript turn", async () => {
+    await removeSession(guardedRunId);
+    const result = await runGuardedCli({
+      apiKey,
+      phone,
+      fetchMock: fakeFetchWithCallResponse(async () =>
+        completedFixtureResponse((resource) => {
+          const attempts = resource.recipients[0]?.attempts;
+          if (attempts?.[0] === undefined) {
+            throw new Error("Expected the completed fixture attempt");
+          }
+          attempts[0].transcript_turns = attempts[0].transcript_turns.filter(
+            (turn) => turn.speaker === "bot",
+          );
+        }),
+      ),
+    });
+
+    try {
+      expect(result.error).toMatchObject({ code: "PROVIDER_RESULT_INVALID" });
+      await expect(
+        readFile(resolve(privateRoot, guardedRunId, "result.json")),
+      ).rejects.toThrow();
+    } finally {
+      await removeSession(guardedRunId);
+    }
+  }, 30_000);
+
+  it("rejects a provider outcome that mismatches the answered scenario", async () => {
+    await removeSession(guardedRunId);
+    const result = await runGuardedCli({
+      apiKey,
+      phone,
+      fetchMock: fakeFetchWithCallResponse(async () =>
+        completedFixtureResponse((resource) => {
+          const structuredResult = resource.recipients[0]?.structured_result;
+          if (structuredResult === null || structuredResult === undefined) {
+            throw new Error("Expected the completed fixture structured result");
+          }
+          structuredResult.contact_outcome = "declined";
+        }),
+      ),
+    });
+
+    try {
+      expect(result.error).toMatchObject({ code: "PROVIDER_RESULT_INVALID" });
+      await expect(
+        readFile(resolve(privateRoot, guardedRunId, "result.json")),
+      ).rejects.toThrow();
+    } finally {
+      await removeSession(guardedRunId);
+    }
+  }, 30_000);
 
   it("composes the guarded Kenya request with exactly one local fake POST", async () => {
     await removeSession(guardedRunId);
@@ -776,7 +1086,7 @@ describe("actual offline CLI composition", () => {
     } finally {
       await removeSession(guardedRunId);
     }
-  });
+  }, 30_000);
 
   it.each([
     ["English", "en-UA"],
@@ -823,6 +1133,7 @@ describe("actual offline CLI composition", () => {
         await removeSession(guardedRunId);
       }
     },
+    30_000,
   );
 
   it("returns bounded pending after guarded polling remains active with one POST", async () => {
@@ -850,7 +1161,7 @@ describe("actual offline CLI composition", () => {
     } finally {
       await removeSession(guardedRunId);
     }
-  }, 15_000);
+  }, 30_000);
 
   it("fails bounded when guarded event pagination remains incomplete", async () => {
     await removeSession(guardedRunId);
@@ -883,7 +1194,7 @@ describe("actual offline CLI composition", () => {
     } finally {
       await removeSession(guardedRunId);
     }
-  });
+  }, 30_000);
 
   it("rejects a pre-existing redirected private session before any provider POST", async (context) => {
     const session = resolve(privateRoot, guardedRunId);
@@ -918,7 +1229,7 @@ describe("actual offline CLI composition", () => {
       await rm(session, { force: true });
       await rm(outside, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it("fails bounded when the pinned session is swapped during evidence open", async (context) => {
     const session = resolve(privateRoot, guardedRunId);
@@ -983,7 +1294,7 @@ describe("actual offline CLI composition", () => {
       await rm(retained, { recursive: true, force: true });
       await rm(outside, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it("reports temporary unlink failure and retains fail-closed private state", async () => {
     const session = resolve(privateRoot, guardedRunId);
@@ -1035,7 +1346,7 @@ describe("actual offline CLI composition", () => {
     } finally {
       await removeSession(guardedRunId);
     }
-  });
+  }, 30_000);
 
   it("rejects link-time mutation after re-reading exact retained-handle bytes", async () => {
     const session = resolve(privateRoot, guardedRunId);
@@ -1072,7 +1383,7 @@ describe("actual offline CLI composition", () => {
     } finally {
       await removeSession(guardedRunId);
     }
-  });
+  }, 30_000);
 
   it.each(["temporary", "final"] as const)(
     "does not delete a substituted %s pathname during rollback",
@@ -1117,6 +1428,7 @@ describe("actual offline CLI composition", () => {
         await removeSession(guardedRunId);
       }
     },
+    30_000,
   );
 
   it("performs no fallible filesystem operation after commit unlink succeeds", async () => {
@@ -1224,7 +1536,7 @@ describe("actual offline CLI composition", () => {
     } finally {
       await removeSession(guardedRunId);
     }
-  });
+  }, 30_000);
 
   it("preserves committed success when sanitized output reporting throws", async () => {
     const { createPreflightProcess } = await freshModule();
@@ -1303,7 +1615,7 @@ describe("actual offline CLI composition", () => {
     } finally {
       await removeSession(guardedRunId);
     }
-  });
+  }, 30_000);
 
   it("rejects oversized private evidence before publishing a final file", async () => {
     await removeSession(guardedRunId);
@@ -1355,5 +1667,5 @@ describe("actual offline CLI composition", () => {
     } finally {
       await removeSession(guardedRunId);
     }
-  });
+  }, 30_000);
 });

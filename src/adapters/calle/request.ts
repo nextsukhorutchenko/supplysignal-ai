@@ -139,8 +139,11 @@ function buildEnglishTask(input: CreateSupplierCall): string {
     "After the complete disclosure, keep each spoken turn concise and natural: one or two short sentences. Ask only one question at a time and wait for the recipient's answer. Do not read the entire purchase order at once or repeat facts the recipient has already confirmed.",
     `Ask about fictional purchase order ${input.order.purchaseOrderRef} from ${input.order.supplierName}.`,
     `Confirm the quantity expected (${input.order.expectedQuantity}), quantity ready now, quantity delayed, and promised delivery date relative to ${input.order.requiredDeliveryDate}.`,
+    "Collect the confirmed quantity, quantity available now, and quantity delayed as three separate answers.",
+    "If those three quantities do not reconcile, repeat all three values and ask exactly one clarification question. Never calculate, repair, or invent a quantity for the recipient.",
+    "Set human follow-up to yes only after an explicit request for a manager, transfer, callback, or other human follow-up. Set it to no after an explicit refusal of human follow-up. Use unknown when the conversation does not establish the answer.",
     "Ask for the delay reason, whether human follow-up is required, and whether the supplier is unable to fulfill the order.",
-    "If the recipient declines, stop politely and do not invent answers. If nobody answers, do not infer supplier facts.",
+    "If the recipient explicitly refuses to continue the conversation, stop politely and do not invent answers. If nobody answers, do not infer supplier facts.",
   ].join("\n");
 }
 
@@ -151,8 +154,11 @@ function buildUkrainianTask(input: CreateSupplierCall): string {
     "Після повного повідомлення говоріть стисло й природно: одне або два короткі речення. Ставте лише одне питання за раз і дочекайтеся відповіді. Не зачитуйте все замовлення одразу та не повторюйте вже підтверджені факти.",
     `Запитайте про вигадане замовлення на закупівлю ${input.order.purchaseOrderRef} від ${input.order.supplierName}.`,
     `Підтвердьте очікувану кількість (${input.order.expectedQuantity}), кількість, готову зараз, кількість із затримкою та обіцяну дату поставки відносно ${input.order.requiredDeliveryDate}.`,
+    "Отримайте окремі відповіді про підтверджену кількість, кількість, доступну зараз, і кількість із затримкою.",
+    "Якщо ці три кількості не узгоджуються, повторіть усі три значення та поставте рівно одне уточнювальне питання. Ніколи не обчислюйте, не виправляйте й не вигадуйте кількість замість співрозмовника.",
+    "Позначайте потребу у зв’язку з людиною як yes лише після прямого прохання про менеджера, переведення дзвінка, зворотний дзвінок або інший контакт із людиною. Позначайте no після прямої відмови від такого контакту. Використовуйте unknown, якщо розмова не встановила відповідь.",
     "Запитайте про причину затримки, потребу у зв’язку з менеджером і чи може постачальник виконати замовлення.",
-    "Якщо співрозмовник відмовляється, ввічливо завершіть розмову й не вигадуйте відповіді. Якщо ніхто не відповідає, не робіть висновків про факти щодо постачальника.",
+    "Якщо співрозмовник прямо відмовляється продовжувати розмову, ввічливо завершіть її й не вигадуйте відповіді. Якщо ніхто не відповідає, не робіть висновків про факти щодо постачальника.",
   ].join("\n");
 }
 
