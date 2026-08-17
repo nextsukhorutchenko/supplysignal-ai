@@ -64,7 +64,7 @@ const expectedEnglishTask = [
   "If those three quantities do not reconcile, repeat all three values and ask exactly one clarification question. Never calculate, repair, or invent a quantity for the recipient.",
   "Set human follow-up to yes only after an explicit request for a manager, transfer, callback, or other human follow-up. Set it to no after an explicit refusal of human follow-up. Use unknown when the conversation does not establish the answer.",
   "Ask for the delay reason, whether human follow-up is required, and whether the supplier is unable to fulfill the order.",
-  "If the recipient declines, stop politely and do not invent answers. If nobody answers, do not infer supplier facts.",
+  "If the recipient explicitly refuses to continue the conversation, stop politely and do not invent answers. If nobody answers, do not infer supplier facts.",
 ].join("\n");
 const expectedUkrainianTask = [
   "Ви — SupplySignal AI, автоматизований агент для телефонних дзвінків.",
@@ -76,7 +76,7 @@ const expectedUkrainianTask = [
   "Якщо ці три кількості не узгоджуються, повторіть усі три значення та поставте рівно одне уточнювальне питання. Ніколи не обчислюйте, не виправляйте й не вигадуйте кількість замість співрозмовника.",
   "Позначайте потребу у зв’язку з людиною як yes лише після прямого прохання про менеджера, переведення дзвінка, зворотний дзвінок або інший контакт із людиною. Позначайте no після прямої відмови від такого контакту. Використовуйте unknown, якщо розмова не встановила відповідь.",
   "Запитайте про причину затримки, потребу у зв’язку з менеджером і чи може постачальник виконати замовлення.",
-  "Якщо співрозмовник відмовляється, ввічливо завершіть розмову й не вигадуйте відповіді. Якщо ніхто не відповідає, не робіть висновків про факти щодо постачальника.",
+  "Якщо співрозмовник прямо відмовляється продовжувати розмову, ввічливо завершіть її й не вигадуйте відповіді. Якщо ніхто не відповідає, не робіть висновків про факти щодо постачальника.",
 ].join("\n");
 const mandatoryDisclosure =
   "Immediately disclose that this is an AI-assisted fictional supplier demo and that the call may be recorded for an approved hackathon demonstration.";
@@ -144,7 +144,7 @@ describe("buildCreateCallRequest", () => {
       taskLines.indexOf(conciseTurnInstruction) + 1,
     );
     expect(task).toContain(
-      "If the recipient declines, stop politely and do not invent answers.",
+      "If the recipient explicitly refuses to continue the conversation, stop politely and do not invent answers.",
     );
     expect(task).toContain("If nobody answers, do not infer supplier facts.");
     expect(task.length).toBeLessThanOrEqual(4_000);
@@ -210,7 +210,7 @@ describe("buildCreateCallRequest", () => {
       taskLines.filter(
         (line) =>
           line ===
-          "Якщо співрозмовник відмовляється, ввічливо завершіть розмову й не вигадуйте відповіді. Якщо ніхто не відповідає, не робіть висновків про факти щодо постачальника.",
+          "Якщо співрозмовник прямо відмовляється продовжувати розмову, ввічливо завершіть її й не вигадуйте відповіді. Якщо ніхто не відповідає, не робіть висновків про факти щодо постачальника.",
       ),
     ).toHaveLength(1);
   });

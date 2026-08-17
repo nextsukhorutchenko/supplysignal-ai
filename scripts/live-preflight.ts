@@ -883,7 +883,10 @@ if (
 ) {
   runCliPreflight().catch((error: unknown) => {
     const code =
-      error instanceof PreflightError ? error.code : "CALL_OUTCOME_PENDING";
+      error instanceof PreflightError ||
+      (error instanceof AppError && error.code === "PROVIDER_RESULT_INVALID")
+        ? error.code
+        : "CALL_OUTCOME_PENDING";
     process.stderr.write(`${code}\n`);
     process.exitCode = 1;
   });

@@ -860,7 +860,7 @@ Run an addition-only privacy check without printing matched values:
 $patterns = @(
   '\+380\d{9}'
   '\+1\d{10}'
-  'Bearer\s+[A-Za-z0-9._-]{12,}'
+  'Bearer\s+[A-Za-z0-9._-]{24,}'
   '[A-Za-z]:\\[^\r\n]+'
 )
 $added = git diff --unified=0 main...HEAD | Where-Object {

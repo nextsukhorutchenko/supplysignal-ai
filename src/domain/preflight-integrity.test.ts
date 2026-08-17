@@ -175,7 +175,16 @@ describe("validatePreflightEvidenceIntegrity", () => {
   it.each([
     ["answered", declinedSnapshot],
     ["declined", answeredSnapshot],
-    ["no_answer", answeredSnapshot],
+    [
+      "no_answer",
+      {
+        ...noAnswerSnapshot,
+        structuredResult: {
+          ...(noAnswerSnapshot.structuredResult as Record<string, unknown>),
+          contactOutcome: "unknown",
+        },
+      },
+    ],
   ] as const)(
     "rejects a %s scenario/outcome mismatch",
     (scenario, snapshot) => {
